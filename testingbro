@@ -1,5 +1,8 @@
 --[[
-	SAIKI RECHAT V2.5 (client-side, Luau / executor)
+	SAIKI RECHAT V2.6 (client-side, Luau / executor)
+	V2.6 adds: tap anyone's profile picture (server chat or DMs, yourself included) to open a profile card
+	            with Follow/Unfollow + DM buttons. Server chat is now strictly same-server: it needs 2+ players
+	            in the server to send, and only shows messages from players who are in this server with you.
 	V2.3 adds: new DM homepage (Recent / In Server / Search), local DM history cache,
 	            lightweight inbox polling, Saiki user directory search.
 	V2.2 adds: long-press / right-click message menu (React, Reply, Copy text).
@@ -80,7 +83,6 @@ local HttpService      = game:GetService("HttpService")
 local RunService       = game:GetService("RunService")
 local Lighting         = game:GetService("Lighting")
 local LP = Players.LocalPlayer
-local SCRIPT_LOAD_MS = os.time() * 1000
 
 local genv = (getgenv and getgenv()) or _G
 if genv.SaikiRechat then pcall(genv.SaikiRechat.Destroy) end
@@ -500,8 +502,8 @@ end
 
 ----------------------------------------------------------------- chat view (bubbles, stickers, grouping)
 local openMenu -- forward (defined near the sticker picker)
-local openUserProfile -- opens a compact profile card from a chat avatar
-local function ChatView(parent, onSend, cooldown, placeholder, onReact)
+local openProfile -- forward (profile card, defined after the message menu)
+local function ChatView(parent, onSend, cooldown, placeholder, onReact, canSend)
 	local self = { lastUid = nil, lastTs = 0, rows = {}, n = 0, items = {}, reacts = {}, mineLock = {}, replyTo = nil }
 	local root = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = parent })
 	local list = new("ScrollingFrame", {
@@ -570,6 +572,7 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 	local nextOk = 0
 	local function fire(p)
 		if os.clock() < nextOk then return false end
+		if canSend and not canSend() then return false end -- e.g. server chat needs 2+ players
 		if cooldown and cooldown > 0 then
 			nextOk = os.clock() + cooldown
 			task.spawn(function()
@@ -684,13 +687,10 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 		local av = new("Frame", { Size = UDim2.fromOffset(avW, 30), BackgroundTransparency = 1,
 			LayoutOrder = mine and 2 or 1, Parent = row })
 		if newGroup and avW > 0 then
-			local avatar = new("ImageButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE,
-				BackgroundTransparency = 0.88, Image = thumb(m.uid), AutoButtonColor = false,
-				Active = true, Parent = av }, { corner(15) })
-			avatar.Activated:Connect(function()
-				if openUserProfile then
-					openUserProfile(tostring(m.uid), tostring(m.name or "Player"))
-				end
+			local avBtn = new("ImageButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.88,
+				Image = thumb(m.uid), AutoButtonColor = false, Parent = av }, { corner(15) })
+			avBtn.Activated:Connect(function()
+				if openProfile then openProfile(m.uid, m.name, m.user) end
 			end)
 		end
 		local col = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
@@ -792,7 +792,7 @@ local TABS = { "Saiki Server", "Saiki DMs", "Profile" }
 local NT = #TABS
 local unread = { false, false, false }
 local cur, isOpen = 1, false
-local closePicker, closeMenu, onShowTab -- forward
+local closePicker, closeMenu, closeProfile, onShowTab -- forward
 
 local scrim = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "",
 	AutoButtonColor = false, Visible = false, Parent = gui })
@@ -840,6 +840,7 @@ local function showTab(i)
 	if i == cur then return end
 	if closePicker then closePicker() end
 	if closeMenu then closeMenu() end
+	if closeProfile then closeProfile() end
 	local dir = (i > cur) and 1 or -1
 	cur = i
 	for k, pg in ipairs(pages) do pg.Visible = (k == i) end
@@ -908,6 +909,7 @@ local function setOpen(v)
 	else
 		if closePicker then closePicker() end
 		if closeMenu then closeMenu() end
+		if closeProfile then closeProfile() end
 		scrim.Visible = false
 		tween(win, 0.2, { GroupTransparency = 1 })
 		tween(winScale, 0.2, { Scale = 0.94 * fitScale() })
@@ -989,6 +991,20 @@ local function sendReaction(path, tAuth, base, key, emoji)
 	end)
 end
 
+-- Server chat is same-server only: players who are in THIS server (the database path is also per-JobId)
+local inServer = {}
+for _, pl in ipairs(Players:GetPlayers()) do inServer[pl.UserId] = true end
+bind(Players.PlayerAdded, function(pl) inServer[pl.UserId] = true end)
+local lastGate = 0
+local function serverCanSend()
+	if #Players:GetPlayers() >= 2 then return true end
+	if os.clock() - lastGate > 3 then
+		lastGate = os.clock()
+		views[1].notice("Server chat needs 2 or more players in this server.")
+	end
+	return false
+end
+
 views[1] = ChatView(container, function(p)
 	if not REQUEST then
 		views[1].add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply })
@@ -1007,20 +1023,20 @@ views[1] = ChatView(container, function(p)
 	end)
 end, CONFIG.COOLDOWN_SERVER, "Message Saiki Server", function(key, e)
 	sendReaction(serverStream.rpath, auth, FIREBASE_DB, key, e)
-end)
+end, serverCanSend)
 pages[1] = views[1].root
 if not REQUEST then views[1].notice("No HTTP function found: running in local demo mode.") end
 
 local function serverHandler(key, m, silent)
-	local msgTs = tonumber(m.ts)
-	if not msgTs or msgTs <= SCRIPT_LOAD_MS then return end
 	local uid = tonumber(m.uid)
 	if not uid or banned[uid] then return end
+	local p = Players:GetPlayerByUserId(uid)
+	if not (p or inServer[uid]) then return end -- not someone who shares this server with me
 	local text, stk = parseMsg(m)
 	if not text then return end
-	local p = Players:GetPlayerByUserId(uid)
 	local name = p and p.DisplayName or (type(m.dn) == "string" and m.dn:sub(1, 40)) or "Player"
-	views[1].add({ uid = uid, name = name, text = text, stk = stk, key = key, reply = parseReply(m) })
+	local user = p and p.Name or (type(m.un) == "string" and m.un:match("^[%w_]+$") and m.un:sub(1, 40)) or nil
+	views[1].add({ uid = uid, name = name, user = user, text = text, stk = stk, key = key, reply = parseReply(m) })
 	if not silent then markUnread(1, uid) end
 end
 
@@ -1439,6 +1455,7 @@ local followBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position 
 
 local function renderStored(st)
 	views.dm.add({ uid = st.u, name = (st.u == ME) and LP.DisplayName or dm.name, text = st.t, stk = st.s, key = st.k,
+		user = (st.u == ME) and LP.Name or (index[dm.partner] and index[dm.partner].u) or nil,
 		reply = st.rk and { k = st.rk, n = st.rn or "", t = st.rt or "" } or nil })
 end
 
@@ -1486,8 +1503,6 @@ views.dm.root.Position = UDim2.fromOffset(0, 38)
 views.dm.root.Size = UDim2.new(1, 0, 1, -38)
 
 local function dmHandler(key, m)
-	local msgTs = tonumber(m.ts)
-	if not msgTs or msgTs <= SCRIPT_LOAD_MS then return end
 	local uid = tostring(m.uid or "")
 	if uid ~= ME and uid ~= dm.partner then return end
 	if banned[tonumber(uid)] then return end
@@ -1510,7 +1525,7 @@ function openThread(id, name, user)
 	-- 1) draw what's already on this device (no network)
 	for _, st in ipairs(activeConv) do dmStream.seen[st.k] = true end -- so Firebase's copy is never drawn twice
 	if #activeConv > 0 then dmStream.last = activeConv[#activeConv].k; dmStream.primed = true end
-	-- Do not render cached messages from before this script was loaded.
+	for i = math.max(1, #activeConv - CONFIG.DM_SHOW + 1), #activeConv do renderStored(activeConv[i]) end
 	dmTitle.Text, dmAv.Image = name, thumb(id)
 	if FS.onThread then FS.onThread(id, name, user) end
 	home.Visible, thread.Visible = false, true
@@ -1622,6 +1637,7 @@ do
 		return t
 	end
 	FS.tierOf = tierOf
+	FS.ROMAN, FS.TCOL = ROMAN, TCOL
 	FS.following, FS.followers, FS.cache = {}, {}, {} -- following[targetId]={n,u}; followers=list; cache[id]={c,t}
 	FS.stamp, FS.loadedF, FS.loading, FS.ok, FS.locked = -1e9, false, false, false, false
 	local function fsReq(method, path, body, extra) return dbRequest(method, path, body, fsAuth, FS_FIREBASE_DB, extra) end
@@ -1766,130 +1782,6 @@ do
 			FS.render()
 		end)
 	end)
-
-
-	-- ===== Chat avatar profile card (keeps the existing chat and tabs intact) =====
-	local userProfileCard
-	local function closeUserProfile()
-		local old = userProfileCard
-		if not old then return end
-		userProfileCard = nil
-		tween(old, 0.16, { GroupTransparency = 1 })
-		task.delay(0.18, function() if old.Parent then old:Destroy() end end)
-	end
-
-	openUserProfile = function(id, displayName)
-		id = tostring(id or "")
-		if id == "" then return end
-		if userProfileCard then closeUserProfile() end
-		if closeMenu then closeMenu() end
-		if closePicker then closePicker() end
-
-		local pl = Players:GetPlayerByUserId(tonumber(id))
-		local isSelf = id == ME
-		local username = isSelf and LP.Name or (pl and pl.Name or (directory[id] and directory[id].n) or "")
-		local shownName = isSelf and LP.DisplayName or ((pl and pl.DisplayName) or (directory[id] and directory[id].d) or displayName or "Player")
-		local overlay = new("CanvasGroup", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
-			BackgroundTransparency = 0.48, GroupTransparency = 1, ZIndex = 40, Parent = win })
-		userProfileCard = overlay
-		local card = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-			Size = UDim2.fromOffset(310, 238), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02,
-			ZIndex = 41, Parent = overlay }, { corner(22), stroke(0.78, 1.2) })
-		local close = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10),
-			Size = UDim2.fromOffset(28, 28), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9,
-			Text = "×", Font = T.fontB, TextSize = 20, TextColor3 = T.text, AutoButtonColor = false,
-			ZIndex = 42, Parent = card }, { corner(14) })
-		close.Activated:Connect(closeUserProfile)
-		new("ImageLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 22),
-			Size = UDim2.fromOffset(66, 66), BackgroundColor3 = WHITE, BackgroundTransparency = 0.86,
-			Image = thumb(id), ZIndex = 42, Parent = card }, { corner(33), stroke(0.72) })
-		new("TextLabel", { Position = UDim2.new(0, 18, 0, 96), Size = UDim2.new(1, -36, 0, 24),
-			BackgroundTransparency = 1, Text = shownName, Font = T.fontB, TextSize = 18, TextColor3 = T.text,
-			TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd,
-			ZIndex = 42, Parent = card })
-		new("TextLabel", { Position = UDim2.new(0, 18, 0, 120), Size = UDim2.new(1, -36, 0, 18),
-			BackgroundTransparency = 1, Text = username ~= "" and ("@" .. username) or ("User ID: " .. id),
-			Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Center,
-			TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 42, Parent = card })
-		local stats = new("TextLabel", { Position = UDim2.new(0, 18, 0, 141), Size = UDim2.new(1, -36, 0, 18),
-			BackgroundTransparency = 1, Text = "Loading follower info…", Font = T.font, TextSize = 12,
-			TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 42, Parent = card })
-
-		local follow = new("TextButton", { Position = UDim2.new(0, 18, 1, -54), Size = UDim2.new(0.5, -24, 0, 36),
-			BackgroundColor3 = WHITE, BackgroundTransparency = 0.05, Text = "Follow", Font = T.fontB, TextSize = 13,
-			TextColor3 = WHITE, AutoButtonColor = false, ZIndex = 42, Parent = card }, { corner(18), grad(0) })
-		local dmButton = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 1, -54),
-			Size = UDim2.new(0.5, -24, 0, 36), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9,
-			Text = "DM", Font = T.fontB, TextSize = 13, TextColor3 = T.text, AutoButtonColor = false,
-			ZIndex = 42, Parent = card }, { corner(18), stroke(0.82) })
-
-		local busy = false
-		if isSelf then
-			follow.Text = "Your profile"
-			follow.Active = false
-			follow.AutoButtonColor = false
-			follow.BackgroundTransparency = 0.88
-			dmButton.Text = "DM yourself"
-			dmButton.Active = false
-			dmButton.AutoButtonColor = false
-			dmButton.BackgroundTransparency = 0.94
-		end
-		local function paint()
-			if isSelf then
-				local count = FS.cache[id] and FS.cache[id].c
-				stats.Text = count ~= nil and (tostring(count) .. (count == 1 and " follower" or " followers") .. "  •  Tier " .. ({ "I", "II", "III", "IV", "V" })[FS.tierOf(count)]) or "Your profile"
-				return
-			end
-			local count = FS.cache[id] and FS.cache[id].c
-			local following = FS.following[id] ~= nil
-			follow.Text = following and "Unfollow" or "Follow"
-			follow.BackgroundTransparency = following and 0.88 or 0.05
-			local g = follow:FindFirstChildOfClass("UIGradient")
-			if g then g.Enabled = not following end
-			stats.Text = count ~= nil and (tostring(count) .. (count == 1 and " follower" or " followers") ..
-				"  •  Tier " .. ({ "I", "II", "III", "IV", "V" })[FS.tierOf(count)]) or "Follower count unavailable"
-		end
-		follow.Activated:Connect(function()
-			if isSelf or busy then return end
-			busy = true
-			follow.Text = "…"
-			task.spawn(function()
-				if not FS.loadedF then FS.loadMine() end
-				local ok, why
-				if FS.following[id] then ok, why = FS.unfollow(id)
-				else ok, why = FS.follow(id, shownName, username) end
-				busy = false
-				if userProfileCard == overlay then
-					paint()
-					if not ok then stats.Text = "Follow failed: " .. tostring(why) end
-				end
-				if FS.render then FS.render() end
-				if FS.paintThread then FS.paintThread() end
-			end)
-		end)
-		dmButton.Activated:Connect(function()
-			if isSelf then return end
-			closeUserProfile()
-			showTab(2)
-			openThread(id, shownName, username)
-		end)
-		overlay.Activated:Connect(function() closeUserProfile() end)
-		card.InputBegan:Connect(function(input) -- keep card taps from closing the overlay
-			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-				-- intentionally handled by controls inside the card
-			end
-		end)
-		paint()
-		task.spawn(function()
-			if not FS.loadedF and not FS.loading then FS.loadMine() end
-			local count = FS.count(id, true)
-			if userProfileCard == overlay then
-				paint()
-				if count == nil then stats.Text = "Follower count unavailable" end
-			end
-		end)
-		tween(overlay, 0.18, { GroupTransparency = 0 })
-	end
 
 	-- ===== Profile tab =====
 	local page = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
@@ -2140,6 +2032,144 @@ function openMenu(view, item, obj)
 		end)
 	end
 	tween(card, 0.2, { GroupTransparency = 0, Position = UDim2.fromOffset(x, y) })
+end
+
+----------------------------------------------------------------- profile card (tap any profile picture)
+local profile
+function closeProfile()
+	local pr = profile
+	if not pr then return end
+	profile = nil
+	tween(pr.card, 0.15, { GroupTransparency = 1 })
+	task.delay(0.17, function() pr.root:Destroy() end)
+end
+
+function openProfile(uid, name, user)
+	uid = string.format("%.0f", tonumber(uid) or 0)
+	if uid == "0" then return end
+	if closePicker then closePicker() end
+	if closeMenu then closeMenu() end
+	if profile then closeProfile() end
+	local mine = (uid == ME)
+
+	-- best known name / username (live player > saved directory > what the message carried)
+	local pl = Players:GetPlayerByUserId(tonumber(uid))
+	if pl then name, user = pl.DisplayName, pl.Name
+	elseif directory[uid] then
+		name = name or directory[uid].d
+		user = (user and user ~= "") and user or directory[uid].n
+	end
+	name = (name and name ~= "") and name or user or "Player"
+
+	local root = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.55, Text = "", AutoButtonColor = false, ZIndex = 30, Parent = win })
+	root.Activated:Connect(closeProfile)
+	local card = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 10),
+		Size = UDim2.fromOffset(250, 222), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02, GroupTransparency = 1,
+		Active = true, ZIndex = 31, Parent = root }, { corner(20), stroke(0.78) })
+	local me = { root = root, card = card }
+	profile = me
+
+	new("ImageLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 16), Size = UDim2.fromOffset(64, 64),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Image = thumb(uid), Parent = card }, { corner(32) })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 86), Size = UDim2.new(1, -28, 0, 22), BackgroundTransparency = 1,
+		Text = name, Font = T.fontB, TextSize = 17, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	local userLbl = new("TextLabel", { Position = UDim2.fromOffset(14, 108), Size = UDim2.new(1, -28, 0, 16), BackgroundTransparency = 1,
+		Text = (user and user ~= "") and ("@" .. user) or "", Font = T.font, TextSize = 12, TextColor3 = T.mut,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	local closeX = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), Size = UDim2.fromOffset(26, 26),
+		BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 20, TextColor3 = T.mut, AutoButtonColor = false, Parent = card })
+	closeX.Activated:Connect(closeProfile)
+
+	-- followers + tier
+	local stats = new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, -34, 0, 134), Size = UDim2.fromOffset(120, 22),
+		BackgroundTransparency = 1, Text = "…", Font = T.font, TextSize = 12, TextColor3 = T.text,
+		TextXAlignment = Enum.TextXAlignment.Right, Parent = card })
+	local chip = new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 56, 0, 135), Size = UDim2.fromOffset(60, 20),
+		BackgroundColor3 = FS.TCOL[1], Text = "", Font = T.fontB, TextSize = 11, TextColor3 = Color3.fromRGB(14, 16, 24),
+		Visible = false, Parent = card }, { corner(10) })
+
+	local function button(text, x, w, primary)
+		local b = new("TextButton", { Position = UDim2.new(0, x, 0, 168), Size = UDim2.new(0, w, 0, 36),
+			BackgroundColor3 = WHITE, BackgroundTransparency = primary and 0 or 0.9, Text = text, Font = T.fontB, TextSize = 14,
+			TextColor3 = WHITE, AutoButtonColor = false, Parent = card }, { corner(18) })
+		if primary then new("UIGradient", { Color = ColorSequence.new(T.accA, T.accB), Rotation = 20, Parent = b }) end
+		return b
+	end
+
+	local function paint()
+		if profile ~= me then return end
+		local c = FS.cache[uid]
+		if c then
+			stats.Text = c.c .. (c.c == 1 and " follower" or " followers")
+			local t = FS.tierOf(c.c)
+			chip.Text, chip.BackgroundColor3, chip.Visible = "TIER " .. FS.ROMAN[t], FS.TCOL[t], true
+		end
+	end
+	paint()
+
+	if mine then
+		local mp = button("My profile", 16, 218, true)
+		mp.Activated:Connect(function() closeProfile(); showTab(3) end)
+	else
+		local fbtn = button("Follow", 16, 106, true)
+		local dbtn = button("DM", 128, 106, false)
+		local g = fbtn:FindFirstChildOfClass("UIGradient")
+		local function paintFollow()
+			if profile ~= me then return end
+			local following = FS.following[uid] ~= nil
+			fbtn.Text = following and "Following" or "Follow"
+			fbtn.BackgroundTransparency = following and 0.9 or 0
+			if g then g.Enabled = not following end
+		end
+		paintFollow()
+		local busy = false
+		fbtn.Activated:Connect(function()
+			if busy then return end
+			busy = true
+			fbtn.Text = "…"
+			task.spawn(function()
+				if not FS.loadedF and not FS.loading then FS.loadMine() end
+				local ok, why
+				if FS.following[uid] then ok, why = FS.unfollow(uid) else ok, why = FS.follow(uid, name, user) end
+				busy = false
+				if not ok then
+					warn("[SAIKI RECHAT] follow: " .. tostring(why))
+					toast("Couldn't update follow")
+				end
+				paintFollow(); paint()
+				FS.render()
+				if FS.paintThread then FS.paintThread() end
+			end)
+		end)
+		dbtn.Activated:Connect(function()
+			local n, u = name, user
+			closeProfile()
+			if not isOpen then return end
+			showTab(2)
+			openThread(uid, n, u)
+		end)
+		task.spawn(function()
+			if REQUEST then
+				if not FS.loadedF and not FS.loading then FS.loadMine() end
+				paintFollow()
+			end
+		end)
+	end
+
+	-- followers count (cached 60s) + username if the message didn't carry one
+	task.spawn(function()
+		if REQUEST then FS.count(uid) end
+		paint()
+	end)
+	if not user or user == "" then
+		task.spawn(function()
+			local ok, nm = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(uid)) end)
+			if ok and nm and profile == me then user = nm; userLbl.Text = "@" .. nm end
+		end)
+	end
+
+	tween(card, 0.22, { GroupTransparency = 0, Position = UDim2.fromScale(0.5, 0.5) }, Enum.EasingStyle.Back)
 end
 
 -- pull reactions for the latest messages of a stream and push them into the view
