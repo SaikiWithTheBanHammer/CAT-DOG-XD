@@ -80,6 +80,7 @@ local HttpService      = game:GetService("HttpService")
 local RunService       = game:GetService("RunService")
 local Lighting         = game:GetService("Lighting")
 local LP = Players.LocalPlayer
+local SCRIPT_LOAD_MS = os.time() * 1000
 
 local genv = (getgenv and getgenv()) or _G
 if genv.SaikiRechat then pcall(genv.SaikiRechat.Destroy) end
@@ -687,7 +688,7 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 				BackgroundTransparency = 0.88, Image = thumb(m.uid), AutoButtonColor = false,
 				Active = true, Parent = av }, { corner(15) })
 			avatar.Activated:Connect(function()
-				if openUserProfile and tostring(m.uid) ~= ME then
+				if openUserProfile then
 					openUserProfile(tostring(m.uid), tostring(m.name or "Player"))
 				end
 			end)
@@ -1011,6 +1012,8 @@ pages[1] = views[1].root
 if not REQUEST then views[1].notice("No HTTP function found: running in local demo mode.") end
 
 local function serverHandler(key, m, silent)
+	local msgTs = tonumber(m.ts)
+	if not msgTs or msgTs <= SCRIPT_LOAD_MS then return end
 	local uid = tonumber(m.uid)
 	if not uid or banned[uid] then return end
 	local text, stk = parseMsg(m)
@@ -1483,6 +1486,8 @@ views.dm.root.Position = UDim2.fromOffset(0, 38)
 views.dm.root.Size = UDim2.new(1, 0, 1, -38)
 
 local function dmHandler(key, m)
+	local msgTs = tonumber(m.ts)
+	if not msgTs or msgTs <= SCRIPT_LOAD_MS then return end
 	local uid = tostring(m.uid or "")
 	if uid ~= ME and uid ~= dm.partner then return end
 	if banned[tonumber(uid)] then return end
@@ -1505,7 +1510,7 @@ function openThread(id, name, user)
 	-- 1) draw what's already on this device (no network)
 	for _, st in ipairs(activeConv) do dmStream.seen[st.k] = true end -- so Firebase's copy is never drawn twice
 	if #activeConv > 0 then dmStream.last = activeConv[#activeConv].k; dmStream.primed = true end
-	for i = math.max(1, #activeConv - CONFIG.DM_SHOW + 1), #activeConv do renderStored(activeConv[i]) end
+	-- Do not render cached messages from before this script was loaded.
 	dmTitle.Text, dmAv.Image = name, thumb(id)
 	if FS.onThread then FS.onThread(id, name, user) end
 	home.Visible, thread.Visible = false, true
@@ -1775,14 +1780,15 @@ do
 
 	openUserProfile = function(id, displayName)
 		id = tostring(id or "")
-		if id == "" or id == ME then return end
+		if id == "" then return end
 		if userProfileCard then closeUserProfile() end
 		if closeMenu then closeMenu() end
 		if closePicker then closePicker() end
 
 		local pl = Players:GetPlayerByUserId(tonumber(id))
-		local username = pl and pl.Name or (directory[id] and directory[id].n) or ""
-		local shownName = (pl and pl.DisplayName) or (directory[id] and directory[id].d) or displayName or "Player"
+		local isSelf = id == ME
+		local username = isSelf and LP.Name or (pl and pl.Name or (directory[id] and directory[id].n) or "")
+		local shownName = isSelf and LP.DisplayName or ((pl and pl.DisplayName) or (directory[id] and directory[id].d) or displayName or "Player")
 		local overlay = new("CanvasGroup", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
 			BackgroundTransparency = 0.48, GroupTransparency = 1, ZIndex = 40, Parent = win })
 		userProfileCard = overlay
@@ -1818,7 +1824,22 @@ do
 			ZIndex = 42, Parent = card }, { corner(18), stroke(0.82) })
 
 		local busy = false
+		if isSelf then
+			follow.Text = "Your profile"
+			follow.Active = false
+			follow.AutoButtonColor = false
+			follow.BackgroundTransparency = 0.88
+			dmButton.Text = "DM yourself"
+			dmButton.Active = false
+			dmButton.AutoButtonColor = false
+			dmButton.BackgroundTransparency = 0.94
+		end
 		local function paint()
+			if isSelf then
+				local count = FS.cache[id] and FS.cache[id].c
+				stats.Text = count ~= nil and (tostring(count) .. (count == 1 and " follower" or " followers") .. "  •  Tier " .. ({ "I", "II", "III", "IV", "V" })[FS.tierOf(count)]) or "Your profile"
+				return
+			end
 			local count = FS.cache[id] and FS.cache[id].c
 			local following = FS.following[id] ~= nil
 			follow.Text = following and "Unfollow" or "Follow"
@@ -1829,7 +1850,7 @@ do
 				"  •  Tier " .. ({ "I", "II", "III", "IV", "V" })[FS.tierOf(count)]) or "Follower count unavailable"
 		end
 		follow.Activated:Connect(function()
-			if busy then return end
+			if isSelf or busy then return end
 			busy = true
 			follow.Text = "…"
 			task.spawn(function()
@@ -1847,6 +1868,7 @@ do
 			end)
 		end)
 		dmButton.Activated:Connect(function()
+			if isSelf then return end
 			closeUserProfile()
 			showTab(2)
 			openThread(id, shownName, username)
