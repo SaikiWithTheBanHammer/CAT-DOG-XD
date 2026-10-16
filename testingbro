@@ -1,5 +1,5 @@
 --[[
-	SAIKI RECHAT V2.4 (client-side, Luau / executor)
+	SAIKI RECHAT V2.5 (client-side, Luau / executor)
 	V2.3 adds: new DM homepage (Recent / In Server / Search), local DM history cache,
 	            lightweight inbox polling, Saiki user directory search.
 	V2.2 adds: long-press / right-click message menu (React, Reply, Copy text).
@@ -20,11 +20,14 @@ repeat task.wait() until game:IsLoaded()
 local FIREBASE_DB       = "https://sxkicxat-default-rtdb.asia-southeast1.firebasedatabase.app"
 local FIREBASE_API_KEY  = "AIzaSyCgvkvar8qhD3zqYC83BW6GHxGQVYoDhrM"
 local DM_FIREBASE_DB    = "https://sxkidirect-default-rtdb.asia-southeast1.firebasedatabase.app"
-local DM_FIREBASE_API_KEY = "AIzaSyALza0_s-MNzaYMrH15WJGAZMJ_RYW4"
+local DM_FIREBASE_API_KEY = "AIzaSyALza0_S-MNAmZanYMrH15WJGAZMJ_RYW4"
 
 if #DM_FIREBASE_API_KEY ~= 39 then
 	warn("[SAIKI RECHAT] DM_FIREBASE_API_KEY is " .. #DM_FIREBASE_API_KEY .. " chars; Firebase web API keys are 39. Re-copy it from Project settings > General.")
 end
+
+local FS_FIREBASE_DB      = "https://sxikiflowsys-default-rtdb.asia-southeast1.firebasedatabase.app"
+local FS_FIREBASE_API_KEY = "AIzaSyCtdBWbOKA2dsjvhuPG-OoyjEiP6QTbsUM"
 
 local GITHUB_OWNER = "SaikiWithTheBanHammer"
 local STICKER_REPOS = {
@@ -55,6 +58,7 @@ local CONFIG = {
 	DM_KEEP = 200,            -- messages kept per DM on this device
 	DM_SHOW = 60,             -- messages drawn when a DM opens (older stay on disk)
 	STICKER_LIST_TTL = 86400, -- seconds before re-checking GitHub for new stickers
+	TIER_AT = { 0, 30, 60, 90, 120 }, -- followers needed for Tier I, II, III, IV, V (edit freely)
 	-- security
 	IDENTITY_INTERVAL = 45,   -- seconds between identity checks
 	AGE_TOLERANCE_DAYS = 3,   -- allowed difference between in-game and Roblox-API account age
@@ -144,8 +148,10 @@ local ALLOWED_REACT = {}
 for _, e in ipairs(REACTIONS) do ALLOWED_REACT[e] = true end
 local function safeName(s) return (tostring(s):gsub("[^%w_%-%.]", "_")) end
 
------------------------------------------------------------------ Firebase (anonymous auth, same as the old script)
-local auth, dmAuth = { token = nil, refresh = nil, uid = nil }, { token = nil, refresh = nil, uid = nil }
+----------------------------------------------------------------- Firebase (anonymous auth, 3 projects)
+-- Each project gets one session object. The anonymous login is SAVED to disk (refresh token), so the same
+-- Firebase uid is reused every launch (no sign-up spam / rate limits, and follower data stays yours).
+local auth, dmAuth, fsAuth, ensureToken -- filled in below
 
 local function requestJSON(method, url, body, headers)
 	if not REQUEST then return false, nil, "no request function" end
@@ -169,40 +175,120 @@ local function dbURL(base, path, token, extra)
 	return url
 end
 
-local function firebaseAuth(target)
-	local key = (target == dmAuth) and DM_FIREBASE_API_KEY or FIREBASE_API_KEY
-	local ok, data, raw = requestJSON("POST",
-		"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" .. key, { returnSecureToken = true })
+do -- login helpers stay private to this block (keeps the script under Luau's 200-local limit)
+local function newAuth(name, key)
+	return { name = name, key = key, token = nil, refresh = nil, uid = nil, exp = 0, busy = false, loaded = false, err = nil }
+end
+auth = newAuth("sxkicxat", FIREBASE_API_KEY)
+dmAuth = newAuth("sxkidirect", DM_FIREBASE_API_KEY)
+fsAuth = newAuth("sxikiflowsys", FS_FIREBASE_API_KEY)
+
+local function sessionPath(t) return CACHE .. "/session_" .. t.name .. "_" .. ME .. ".json" end
+local function loadSession(t)
+	if not (isfile and readfile) then return end
+	pcall(function()
+		if not isfile(sessionPath(t)) then return end
+		local d = HttpService:JSONDecode(readfile(sessionPath(t)))
+		if type(d) == "table" and type(d.refresh) == "string" and d.refresh ~= "" then
+			t.refresh, t.uid = d.refresh, d.uid
+		end
+	end)
+end
+local function saveSession(t)
+	if not writefile or not t.refresh then return end
+	pcall(function()
+		if makefolder and isfolder and not isfolder(CACHE) then makefolder(CACHE) end
+		writefile(sessionPath(t), HttpService:JSONEncode({ refresh = t.refresh, uid = t.uid }))
+	end)
+end
+
+local function errText(data, raw)
+	if type(data) == "table" and type(data.error) == "table" and data.error.message then return tostring(data.error.message):sub(1, 120) end
+	return tostring(raw or "no response"):sub(1, 120)
+end
+local function applyToken(t, idToken, refresh, uid, expires)
+	t.token = idToken
+	if refresh then t.refresh = refresh end
+	if uid then t.uid = uid end
+	t.exp = os.time() + (tonumber(expires) or 3600) - 180 -- renew 3 minutes BEFORE it expires
+	t.err = nil
+end
+local function signUp(t)
+	local ok, data, raw = requestJSON("POST", "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" .. t.key, { returnSecureToken = true })
 	if ok and type(data) == "table" and data.idToken then
-		target.token, target.refresh, target.uid = data.idToken, data.refreshToken, data.localId
+		applyToken(t, data.idToken, data.refreshToken, data.localId, data.expiresIn)
+		saveSession(t)
 		return true
 	end
-	warn("[SAIKI RECHAT] Firebase auth failed: " .. tostring(raw))
+	t.err = errText(data, raw)
+	return false
+end
+local function refreshTok(t)
+	if not t.refresh then return false end
+	local ok, data, raw, code = requestJSON("POST", "https://securetoken.googleapis.com/v1/token?key=" .. t.key,
+		"grant_type=refresh_token&refresh_token=" .. enc(t.refresh), { ["Content-Type"] = "application/x-www-form-urlencoded" })
+	if ok and type(data) == "table" and data.id_token then
+		applyToken(t, data.id_token, data.refresh_token, data.user_id, data.expires_in)
+		saveSession(t)
+		return true
+	end
+	t.err = errText(data, raw)
+	-- only a definite "this login is dead" answer discards the saved login; network hiccups keep it
+	if code == 400 then t.refresh = nil end
 	return false
 end
 
-local function refreshAuth(target)
-	if not target.refresh then return firebaseAuth(target) end
-	local key = (target == dmAuth) and DM_FIREBASE_API_KEY or FIREBASE_API_KEY
-	local ok, data = requestJSON("POST", "https://securetoken.googleapis.com/v1/token?key=" .. key,
-		"grant_type=refresh_token&refresh_token=" .. enc(target.refresh),
-		{ ["Content-Type"] = "application/x-www-form-urlencoded" })
-	if ok and type(data) == "table" and data.id_token then
-		target.token = data.id_token
-		target.refresh = data.refresh_token or target.refresh
-		return true
+-- Make sure t.token is valid. Single-flight: parallel callers wait for ONE login instead of each signing up.
+-- force=true + badToken: the server rejected badToken, so renew (unless someone already did).
+function ensureToken(t, force, badToken)
+	if not force and t.token and os.time() < t.exp then return true end
+	local waited = 0
+	while t.busy and waited < 20 do task.wait(0.1); waited = waited + 0.1 end
+	if force and t.token and t.token ~= badToken and os.time() < t.exp then return true end
+	if not force and t.token and os.time() < t.exp then return true end
+	t.busy = true
+	if not t.loaded then t.loaded = true; loadSession(t) end
+	local ok = false
+	for attempt = 1, 4 do
+		if t.refresh then
+			if refreshTok(t) then ok = true; break end
+		end
+		if not t.refresh then
+			if signUp(t) then ok = true; break end
+		end
+		task.wait(0.5 * attempt)
 	end
-	return firebaseAuth(target)
+	t.busy = false
+	return ok
 end
+
+end -- login helpers
 
 local function dbRequest(method, path, body, target, base, extra)
 	target, base = target or auth, base or FIREBASE_DB
-	if not target.token and not firebaseAuth(target) then return false, nil, "auth unavailable" end
-	local ok, data, raw, code = requestJSON(method, dbURL(base, path, target.token, extra), body)
-	if code == 401 and refreshAuth(target) then
-		ok, data, raw, code = requestJSON(method, dbURL(base, path, target.token, extra), body)
+	if not ensureToken(target) then return false, nil, "auth failed: " .. tostring(target.err), nil end
+	local used, refreshed, tries = target.token, false, 0
+	local ok, data, raw, code
+	while true do
+		tries = tries + 1
+		ok, data, raw, code = requestJSON(method, dbURL(base, path, used, extra), body)
+		if ok then break end
+		if code == 401 and not refreshed then
+			refreshed = true -- token may have just expired: renew once and retry
+			if not ensureToken(target, true, used) then break end
+			used = target.token
+		elseif tries < 3 and (code == nil or code == 0 or code == 429 or code >= 500) then
+			task.wait(0.5 * tries) -- transient network / server hiccup
+		else
+			break
+		end
 	end
 	return ok, data, raw, code
+end
+
+-- log in to all three projects right away so the first message never waits on a login
+if REQUEST then
+	task.spawn(function() ensureToken(auth); ensureToken(dmAuth); ensureToken(fsAuth) end)
 end
 
 ----------------------------------------------------------------- persistent cache + stickers
@@ -694,9 +780,9 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 end
 
 ----------------------------------------------------------------- window + tabs (2 tabs)
-local TABS = { "Saiki Server", "Saiki DMs" }
+local TABS = { "Saiki Server", "Saiki DMs", "Profile" }
 local NT = #TABS
-local unread = { false, false }
+local unread = { false, false, false }
 local cur, isOpen = 1, false
 local closePicker, closeMenu, onShowTab -- forward
 
@@ -807,7 +893,7 @@ local function setOpen(v)
 		win.Visible, scrim.Visible = true, true
 		tween(win, 0.28, { GroupTransparency = 0 })
 		tween(winScale, 0.34, { Scale = fitScale() }, Enum.EasingStyle.Back)
-		if cur == 2 and onShowTab then onShowTab(2) end
+		if onShowTab then onShowTab(cur) end
 		if blur then tween(blur, 0.3, { Size = 14 }) end
 		unread[cur] = false
 		updateDots()
@@ -866,9 +952,10 @@ local function sendFail(view, raw, code, dbName)
 	warn("[SAIKI RECHAT] send failed on " .. tostring(dbName or "?") .. " (HTTP " .. tostring(code) .. "): " .. tostring(raw):sub(1, 300))
 	local why
 	if code == 401 or code == 403 then
-		why = "Firebase denied the write (" .. code .. "). Publish the latest rules for " .. tostring(dbName or "this database")
-	elseif code == 400 then why = "Firebase rejected the request or API key (400)"
-	elseif not code then why = "auth failed or no response, see F9 console"
+		local msg = tostring(raw):match('"error"%s*:%s*"([^"]+)"') or "denied"
+		why = tostring(dbName or "database") .. " refused the write (" .. code .. ": " .. msg .. "). Check its rules are published"
+	elseif code == 400 then why = "Firebase rejected the request (400)"
+	elseif not code then why = tostring(raw or "no response"):sub(1, 90)
 	else why = "HTTP " .. tostring(code) end
 	view.notice("Couldn't send: " .. why)
 end
@@ -953,12 +1040,15 @@ end
 
 -- ===== local stores (loaded once; Firebase is only asked for what's NEW) =====
 -- index[partnerId] = { n=name, u=username, p=pairKey, l=lastKey, r=readKey, ts=lastMs, me=lastIsMine, x=preview, it=inboxTs }
-local idxFile = readJson(INDEX_FILE) or {}
-local index, legacyDone, indexDirty = idxFile.e or {}, idxFile.legacy == true, false
-local dirFile = readJson(DIR_FILE) or {}
-local directory, dirSync, dirDirty = dirFile.u or {}, tonumber(dirFile.sync) or 0, false -- [id] = {d=display, n=username}
-local frFile = readJson(FRIENDS_FILE) or {}
-local friends, friendsAt = frFile.f or {}, tonumber(frFile.t) or 0
+local index, legacyDone, indexDirty
+local directory, dirSync, dirDirty -- [id] = {d=display, n=username}
+local friends, friendsAt
+do
+	local f1, f2, f3 = readJson(INDEX_FILE) or {}, readJson(DIR_FILE) or {}, readJson(FRIENDS_FILE) or {}
+	index, legacyDone, indexDirty = f1.e or {}, f1.legacy == true, false
+	directory, dirSync, dirDirty = f2.u or {}, tonumber(f2.sync) or 0, false
+	friends, friendsAt = f3.f or {}, tonumber(f3.t) or 0
+end
 
 local function convPath(pid) return DM_DIR .. "/" .. pairKey(ME, pid) .. ".json" end
 local function loadConv(pid)
@@ -1006,6 +1096,7 @@ local function resolveName(pid)
 end
 
 local dm = { partner = nil, name = "" }
+local FS = {} -- follower system (filled in below)
 local dmStream, activeConv, activeDirty = nil, nil, false
 local home, refreshHome, openThread -- forward
 
@@ -1024,21 +1115,6 @@ local dmPage = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparen
 pages[2] = dmPage
 
 home = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = dmPage })
-local searchBar = new("Frame", { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -28, 0, 36), BackgroundColor3 = WHITE,
-	BackgroundTransparency = 0.92, Parent = home }, { corner(18), stroke(0.88) })
--- little magnifier drawn from two frames (no font/emoji dependency)
-new("Frame", { Position = UDim2.fromOffset(15, 10), Size = UDim2.fromOffset(12, 12), BackgroundTransparency = 1, Parent = searchBar },
-	{ corner(6), stroke(0.35, 1.6) })
-new("Frame", { Position = UDim2.fromOffset(25, 24), Size = UDim2.fromOffset(7, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.35,
-	Rotation = 45, BorderSizePixel = 0, Parent = searchBar })
-local searchBox = new("TextBox", { Position = UDim2.fromOffset(40, 0), Size = UDim2.new(1, -78, 1, 0), BackgroundTransparency = 1,
-	Text = "", PlaceholderText = "Search any player (name or username)", PlaceholderColor3 = T.mut, TextColor3 = T.text,
-	Font = T.font, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Parent = searchBar })
-local clearBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(24, 24),
-	BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Text = "×", Font = T.fontB, TextSize = 16, TextColor3 = T.text,
-	AutoButtonColor = false, Visible = false, Parent = searchBar }, { corner(12) })
-bind(clearBtn.Activated, function() searchBox.Text = "" end)
-
 local function newScroll(parent)
 	return new("ScrollingFrame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
 		ScrollBarThickness = 3, ScrollBarImageColor3 = T.mut, CanvasSize = UDim2.new(),
@@ -1132,6 +1208,24 @@ local function loadFriends()
 		writeJson(FRIENDS_FILE, { t = friendsAt, f = friends })
 	end
 end
+local buildHome -- forward
+local UI = {}
+do -- search logic (private locals)
+local searchBar = new("Frame", { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -28, 0, 36), BackgroundColor3 = WHITE,
+	BackgroundTransparency = 0.92, Parent = home }, { corner(18), stroke(0.88) })
+-- little magnifier drawn from two frames (no font/emoji dependency)
+new("Frame", { Position = UDim2.fromOffset(15, 10), Size = UDim2.fromOffset(12, 12), BackgroundTransparency = 1, Parent = searchBar },
+	{ corner(6), stroke(0.35, 1.6) })
+new("Frame", { Position = UDim2.fromOffset(25, 24), Size = UDim2.fromOffset(7, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.35,
+	Rotation = 45, BorderSizePixel = 0, Parent = searchBar })
+local searchBox = new("TextBox", { Position = UDim2.fromOffset(40, 0), Size = UDim2.new(1, -78, 1, 0), BackgroundTransparency = 1,
+	Text = "", PlaceholderText = "Search any player (name or username)", PlaceholderColor3 = T.mut, TextColor3 = T.text,
+	Font = T.font, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Parent = searchBar })
+local clearBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(24, 24),
+	BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Text = "×", Font = T.fontB, TextSize = 16, TextColor3 = T.text,
+	AutoButtonColor = false, Visible = false, Parent = searchBar }, { corner(12) })
+bind(clearBtn.Activated, function() searchBox.Text = "" end)
+
 local function robloxSearch(q)
 	local ok, data = requestJSON("GET", "https://users.roblox.com/v1/users/search?keyword=" .. enc(q) .. "&limit=10")
 	local out = {}
@@ -1183,7 +1277,6 @@ local function searchLocal(q)
 	for id, u in pairs(directory) do consider(cands, id, u.d, u.n, 3, "On Saiki", q) end
 	return cands
 end
-local HINT = "Search your history, friends, Saiki users, this server and all of Roblox."
 local function renderResults(cands, pending)
 	clearList(feed)
 	local arr = {}
@@ -1209,7 +1302,6 @@ local function renderResults(cands, pending)
 	if pending then addEmpty(feed, "Searching Roblox…", 999) end
 end
 local searchTok, lastApi = 0, 0
-local buildHome -- forward
 local function runSearch()
 	searchTok += 1
 	local tok = searchTok
@@ -1239,8 +1331,11 @@ local function runSearch()
 	end)
 end
 bind(searchBox:GetPropertyChangedSignal("Text"), runSearch)
+UI.renderResults = renderResults
+end -- search logic
 
 -- ===== home feed: "In this server" strip + "Recent" chats (one page) =====
+do -- home feed (private helpers)
 local GREEN = Color3.fromRGB(80, 220, 140)
 local function addStrip(sf, arr, order)
 	local strip = new("ScrollingFrame", { Size = UDim2.new(1, 0, 0, 84), BackgroundTransparency = 1, BorderSizePixel = 0,
@@ -1304,7 +1399,7 @@ end
 
 function refreshHome()
 	if searchQ ~= "" then
-		if lastCands then renderResults(lastCands, lastPending) end
+		if lastCands then UI.renderResults(lastCands, lastPending) end
 	else
 		buildHome()
 	end
@@ -1313,6 +1408,7 @@ onShowTab = function(i) if i == 2 and home.Visible then refreshHome() end end
 local function homeLive() return alive and isOpen and cur == 2 and home.Visible end
 bind(Players.PlayerAdded, function() if homeLive() and searchQ == "" then refreshHome() end end)
 bind(Players.PlayerRemoving, function() task.delay(0.2, function() if homeLive() and searchQ == "" then refreshHome() end end) end)
+end -- home feed
 
 -- ===== thread (chat view) =====
 local thread = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = dmPage })
@@ -1321,9 +1417,15 @@ local backBtn = new("TextButton", { Position = UDim2.fromOffset(14, 2), Size = U
 	TextColor3 = T.text, AutoButtonColor = false, Parent = thread }, { corner(12) })
 local dmAv = new("ImageLabel", { Position = UDim2.fromOffset(56, 3), Size = UDim2.fromOffset(30, 30),
 	BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = thread }, { corner(15) })
-local dmTitle = new("TextLabel", { Position = UDim2.fromOffset(94, 2), Size = UDim2.new(1, -110, 0, 32),
+local dmTitle = new("TextLabel", { Position = UDim2.fromOffset(94, 1), Size = UDim2.new(1, -206, 0, 19),
 	BackgroundTransparency = 1, Text = "", Font = T.fontB, TextSize = 15, TextColor3 = T.text,
 	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = thread })
+local dmSub = new("TextLabel", { Position = UDim2.fromOffset(94, 19), Size = UDim2.new(1, -206, 0, 14),
+	BackgroundTransparency = 1, Text = "", Font = T.font, TextSize = 11, TextColor3 = T.mut,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = thread })
+local followBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 4), Size = UDim2.fromOffset(92, 26),
+	BackgroundColor3 = WHITE, Text = "Follow", Font = T.fontB, TextSize = 12, TextColor3 = WHITE, AutoButtonColor = false,
+	Visible = false, Parent = thread }, { corner(13), grad(20) })
 
 local function renderStored(st)
 	views.dm.add({ uid = st.u, name = (st.u == ME) and LP.DisplayName or dm.name, text = st.t, stk = st.s, key = st.k,
@@ -1398,6 +1500,7 @@ function openThread(id, name, user)
 	if #activeConv > 0 then dmStream.last = activeConv[#activeConv].k; dmStream.primed = true end
 	for i = math.max(1, #activeConv - CONFIG.DM_SHOW + 1), #activeConv do renderStored(activeConv[i]) end
 	dmTitle.Text, dmAv.Image = name, thumb(id)
+	if FS.onThread then FS.onThread(id, name, user) end
 	home.Visible, thread.Visible = false, true
 	if not REQUEST then views.dm.notice("Local demo mode: messages stay on your device.") end
 	local e = touchIndex(id, nil, name, user)
@@ -1495,6 +1598,268 @@ end
 
 refreshHome()
 refreshUnread()
+
+----------------------------------------------------------------- follower system (Firebase project sxikiflowsys)
+do
+	local ROMAN = { "I", "II", "III", "IV", "V" }
+	local TCOL = { Color3.fromRGB(120, 132, 165), Color3.fromRGB(80, 205, 140), Color3.fromRGB(64, 165, 255),
+		Color3.fromRGB(160, 105, 255), Color3.fromRGB(255, 192, 64) }
+	local function tierOf(n)
+		local t = 1
+		for i, th in ipairs(CONFIG.TIER_AT) do if n >= th then t = i end end
+		return t
+	end
+	FS.tierOf = tierOf
+	FS.following, FS.followers, FS.cache = {}, {}, {} -- following[targetId]={n,u}; followers=list; cache[id]={c,t}
+	FS.stamp, FS.loadedF, FS.loading, FS.ok, FS.locked = -1e9, false, false, false, false
+	local function fsReq(method, path, body, extra) return dbRequest(method, path, body, fsAuth, FS_FIREBASE_DB, extra) end
+	local function myUid()
+		if ensureToken(fsAuth) then return fsAuth.uid end
+		return nil
+	end
+	local function idStr(n) return string.format("%.0f", tonumber(n) or 0) end
+
+	-- followers of `id` = number of keys under /followers/<id> (shallow = keys only, tiny download)
+	function FS.count(id, force)
+		local c = FS.cache[id]
+		if c and not force and os.clock() - c.t < 60 then return c.c end
+		local ok, data = fsReq("GET", "/followers/" .. id, nil, "shallow=true")
+		if not ok then return c and c.c or nil end
+		local n = 0
+		if type(data) == "table" then for _ in pairs(data) do n = n + 1 end end
+		FS.cache[id] = { c = n, t = os.clock() }
+		return n
+	end
+
+	function FS.writeProfile()
+		local uid = myUid()
+		if not uid then return end
+		local ok, _, _, code = fsReq("PUT", "/profiles/" .. ME, { robloxUserId = LP.UserId, username = cut(LP.Name, 40),
+			displayName = cut(LP.DisplayName, 80), firebaseUid = uid, updatedAt = SV })
+		FS.locked = (not ok) and (code == 401 or code == 403)
+	end
+
+	function FS.follow(id, name, user)
+		local uid = myUid()
+		if not uid then return false, "follower system offline (" .. tostring(fsAuth.err) .. ")" end
+		local ok, _, _, code = fsReq("PUT", "/follows/" .. uid .. "/" .. id, { targetRobloxUserId = tonumber(id),
+			targetUsername = cut(user or name or "", 40), targetDisplayName = cut(name or user or "", 80), createdAt = SV })
+		if not ok then return false, (code == 401 or code == 403) and "refused by the follower rules" or ("HTTP " .. tostring(code)) end
+		local ok2, _, _, code2 = fsReq("PUT", "/followers/" .. id .. "/" .. uid, { ts = SV, rid = LP.UserId,
+			un = cut(LP.Name, 40), dn = cut(LP.DisplayName, 80) })
+		if not ok2 then
+			fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
+			return false, (code2 == 401 or code2 == 403) and "refused by the follower rules (add the 'followers' rules)" or ("HTTP " .. tostring(code2))
+		end
+		FS.following[id] = { n = name or user or id, u = user or "" }
+		local c = FS.cache[id]
+		if c then c.c = c.c + 1 end
+		return true
+	end
+
+	function FS.unfollow(id)
+		local uid = myUid()
+		if not uid then return false, "follower system offline" end
+		local ok = fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
+		local ok2 = fsReq("DELETE", "/followers/" .. id .. "/" .. uid)
+		if not ok or not ok2 then return false, "couldn't remove it, try again" end
+		FS.following[id] = nil
+		local c = FS.cache[id]
+		if c and c.c > 0 then c.c = c.c - 1 end
+		return true
+	end
+
+	function FS.loadMine()
+		if FS.loading then return end
+		local uid = myUid()
+		if not uid then FS.render(); return end
+		FS.loading = true
+		local ok, data = fsReq("GET", "/follows/" .. uid)
+		if ok then
+			local f = {}
+			if type(data) == "table" then
+				for tid, r in pairs(data) do
+					if type(r) == "table" then
+						f[tostring(tid)] = { n = tostring(r.targetDisplayName or r.targetUsername or tid), u = tostring(r.targetUsername or "") }
+					end
+				end
+			end
+			FS.following, FS.loadedF = f, true
+		end
+		local ok2, d2 = fsReq("GET", "/followers/" .. ME)
+		if ok2 then
+			local list = {}
+			if type(d2) == "table" then
+				for _, r in pairs(d2) do
+					if type(r) == "table" and r.rid then
+						list[#list + 1] = { id = idStr(r.rid), n = tostring(r.dn or r.un or "?"), u = tostring(r.un or ""), ts = tonumber(r.ts) or 0 }
+					end
+				end
+			end
+			table.sort(list, function(a, b) return a.ts > b.ts end)
+			FS.followers = list
+			FS.cache[ME] = { c = #list, t = os.clock() }
+		end
+		FS.stamp, FS.loading = os.clock(), false
+		FS.render()
+		if FS.paintThread then FS.paintThread() end
+	end
+
+	function FS.init()
+		if not REQUEST then FS.render(); return end
+		if myUid() then
+			FS.ok = true
+			FS.writeProfile()
+			FS.loadMine()
+		else
+			FS.render()
+		end
+	end
+
+	-- ===== DM thread header: follower count, tier, Follow button =====
+	function FS.paintThread()
+		local id = FS.threadId
+		if not id then return end
+		local c = FS.cache[id]
+		local following = FS.following[id] ~= nil
+		followBtn.Text = following and "Following" or "Follow"
+		followBtn.BackgroundTransparency = following and 0.86 or 0
+		local g = followBtn:FindFirstChildOfClass("UIGradient")
+		if g then g.Enabled = not following end
+		dmSub.Text = c and (c.c .. (c.c == 1 and " follower" or " followers") .. "  •  Tier " .. ROMAN[tierOf(c.c)]) or "…"
+	end
+	function FS.onThread(id, name, user)
+		FS.threadId, FS.threadName, FS.threadUser = id, name, user
+		followBtn.Visible = (id ~= ME)
+		FS.paintThread()
+		task.spawn(function()
+			if not FS.loadedF and not FS.loading then FS.loadMine() end
+			FS.count(id)
+			if FS.threadId == id then FS.paintThread() end
+		end)
+	end
+	local pending = false
+	bind(followBtn.Activated, function()
+		local id = FS.threadId
+		if not id or pending or id == ME then return end
+		pending = true
+		followBtn.Text = "…"
+		task.spawn(function()
+			if not FS.loadedF then FS.loadMine() end
+			local ok, why
+			if FS.following[id] then ok, why = FS.unfollow(id) else ok, why = FS.follow(id, FS.threadName, FS.threadUser) end
+			pending = false
+			if FS.threadId == id then FS.paintThread() end
+			if not ok then views.dm.notice("Couldn't update follow: " .. tostring(why)) end
+			FS.render()
+		end)
+	end)
+
+	-- ===== Profile tab =====
+	local page = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
+	pages[3] = page
+	local sc = newScroll(page)
+
+	local function personRow(e, order, withUnfollow)
+		local r = new("TextButton", { Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, Text = "",
+			AutoButtonColor = false, LayoutOrder = order, Parent = sc }, { corner(14), stroke(0.92) })
+		new("ImageLabel", { Position = UDim2.fromOffset(10, 9), Size = UDim2.fromOffset(32, 32), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Image = thumb(e.id), Parent = r }, { corner(16) })
+		local right = withUnfollow and 100 or 20
+		new("TextLabel", { Position = UDim2.fromOffset(52, 6), Size = UDim2.new(1, -52 - right, 0, 20), BackgroundTransparency = 1,
+			Text = e.n, Font = T.fontB, TextSize = 14, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+		new("TextLabel", { Position = UDim2.fromOffset(52, 26), Size = UDim2.new(1, -52 - right, 0, 16), BackgroundTransparency = 1,
+			Text = (e.u and e.u ~= "") and ("@" .. e.u) or "", Font = T.font, TextSize = 12, TextColor3 = T.mut,
+			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+		if withUnfollow then
+			local ub = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(78, 26),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.86, Text = "Unfollow", Font = T.fontB, TextSize = 12,
+				TextColor3 = T.text, AutoButtonColor = false, Parent = r }, { corner(13) })
+			ub.Activated:Connect(function()
+				ub.Text = "…"
+				task.spawn(function()
+					local ok, why = FS.unfollow(e.id)
+					if not ok then ub.Text = "Retry"; warn("[SAIKI RECHAT] unfollow: " .. tostring(why)) end
+					FS.render()
+					if FS.paintThread then FS.paintThread() end
+				end)
+			end)
+		end
+		r.Activated:Connect(function() showTab(2); openThread(e.id, e.n, e.u) end)
+	end
+
+	function FS.render()
+		if not page.Parent then return end
+		local keep = sc.CanvasPosition
+		clearList(sc)
+		local nFollowing = 0
+		for _ in pairs(FS.following) do nFollowing = nFollowing + 1 end
+		local cnt = (FS.cache[ME] and FS.cache[ME].c) or #FS.followers
+		local tier = tierOf(cnt)
+		local lo, nextAt = CONFIG.TIER_AT[tier], CONFIG.TIER_AT[tier + 1]
+		local pct = nextAt and math.clamp((cnt - lo) / math.max(1, nextAt - lo), 0, 1) or 1
+		local nextTxt = nextAt and ((nextAt - cnt) .. " more for Tier " .. ROMAN[tier + 1]) or "Max tier reached"
+
+		local card = new("Frame", { Size = UDim2.new(1, 0, 0, 128), BackgroundColor3 = WHITE, BackgroundTransparency = 0.93,
+			LayoutOrder = 1, Parent = sc }, { corner(18), stroke(0.9) })
+		new("ImageLabel", { Position = UDim2.fromOffset(14, 12), Size = UDim2.fromOffset(56, 56), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Image = thumb(ME), Parent = card }, { corner(28) })
+		new("TextLabel", { Position = UDim2.fromOffset(82, 14), Size = UDim2.new(1, -196, 0, 22), BackgroundTransparency = 1,
+			Text = LP.DisplayName, Font = T.fontB, TextSize = 17, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+		new("TextLabel", { Position = UDim2.fromOffset(82, 38), Size = UDim2.new(1, -196, 0, 16), BackgroundTransparency = 1,
+			Text = "@" .. LP.Name, Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+		new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 16), Size = UDim2.fromOffset(92, 26),
+			BackgroundColor3 = TCOL[tier], Text = "TIER " .. ROMAN[tier], Font = T.fontB, TextSize = 12, TextColor3 = Color3.fromRGB(14, 16, 24),
+			Parent = card }, { corner(13) })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 72), Size = UDim2.fromOffset(90, 36), BackgroundTransparency = 1, RichText = true,
+			Text = string.format('<font size="20"><b>%d</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWERS</font>', cnt),
+			Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
+		new("TextLabel", { Position = UDim2.fromOffset(112, 72), Size = UDim2.fromOffset(90, 36), BackgroundTransparency = 1, RichText = true,
+			Text = string.format('<font size="20"><b>%d</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWING</font>', nFollowing),
+			Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
+		new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 76), Size = UDim2.fromOffset(190, 30),
+			BackgroundTransparency = 1, RichText = true,
+			Text = string.format('<font size="11" color="rgb(150,156,175)">NEXT TIER</font>\n<font size="13"><b>%s</b></font>', nextTxt),
+			Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Right, Parent = card })
+		local bar = new("Frame", { Position = UDim2.new(0, 14, 1, -14), Size = UDim2.new(1, -28, 0, 5), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Parent = card }, { corner(3) })
+		new("Frame", { Size = UDim2.fromScale(pct, 1), BackgroundColor3 = WHITE, Parent = bar }, { corner(3), grad(0) })
+
+		if not FS.ok and not fsAuth.token then
+			addEmpty(sc, "Follower system offline: " .. tostring(fsAuth.err or "connecting…"), 2, 40)
+		elseif FS.locked then
+			addEmpty(sc, "Your follower profile is tied to an older login on this account. Following still works.", 2, 40)
+		end
+
+		addHeader(sc, "Following", 10, tostring(nFollowing))
+		local fl = {}
+		for id, e in pairs(FS.following) do fl[#fl + 1] = { id = id, n = e.n, u = e.u } end
+		table.sort(fl, function(a, b) return a.n:lower() < b.n:lower() end)
+		if #fl == 0 then addEmpty(sc, "You're not following anyone yet.\nOpen a DM and tap Follow.", 11, 50) end
+		for i, e in ipairs(fl) do personRow(e, 11 + i, true) end
+
+		addHeader(sc, "Followers", 1000, tostring(#FS.followers))
+		if #FS.followers == 0 then addEmpty(sc, "No followers yet.", 1001, 36) end
+		for i, e in ipairs(FS.followers) do
+			if i > CONFIG.TIER_AT[#CONFIG.TIER_AT] + 30 then break end
+			personRow(e, 1001 + i, false)
+		end
+		sc.CanvasPosition = keep
+	end
+
+	local prevShow = onShowTab
+	onShowTab = function(i)
+		if prevShow then prevShow(i) end
+		if i == 3 then
+			FS.render()
+			if os.clock() - FS.stamp > 45 and not FS.loading then task.spawn(FS.loadMine) end
+		end
+	end
+	FS.render()
+end
 
 ----------------------------------------------------------------- sticker picker
 local picker, pickerLoadId = nil, 0
@@ -1680,6 +2045,8 @@ task.spawn(function()
 			if n == 3 or n % 360 == 0 then syncDirectory() end -- Saiki users list (only changes since last sync)
 			if n == 4 then task.spawn(writeMyProfile) end
 			if n == 5 then task.spawn(loadFriends) end
+			if n == 6 or (n % 60 == 0 and not FS.ok) then task.spawn(FS.init) end -- follower login + own profile
+			if n % 120 == 0 and FS.ok then task.spawn(FS.loadMine) end        -- refresh my followers/following every ~5 min
 			if n == 7 and home.Visible and isOpen and cur == 2 then refreshHome() end -- friends / directory just arrived
 		end
 		if n % 2 == 0 then flushAll(false) end
