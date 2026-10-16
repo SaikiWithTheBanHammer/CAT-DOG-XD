@@ -1436,8 +1436,8 @@ local dmSub = new("TextLabel", { Position = UDim2.fromOffset(94, 19), Size = UDi
 	BackgroundTransparency = 1, Text = "", Font = T.font, TextSize = 11, TextColor3 = T.mut,
 	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = thread })
 local followBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 4), Size = UDim2.fromOffset(92, 26),
-	BackgroundColor3 = WHITE, Text = "Follow", Font = T.fontB, TextSize = 12, TextColor3 = WHITE, AutoButtonColor = false,
-	Visible = false, Parent = thread }, { corner(13), grad(20) })
+	BackgroundColor3 = T.accA, Text = "Profile", Font = T.fontB, TextSize = 12, TextColor3 = WHITE, AutoButtonColor = false,
+	Visible = false, Parent = thread }, { corner(13) })
 
 local function renderStored(st)
 	views.dm.add({ uid = st.u, name = (st.u == ME) and LP.DisplayName or dm.name, text = st.t, stk = st.s, key = st.k,
@@ -1624,6 +1624,15 @@ do
 	FS.tierOf, FS.ROMAN, FS.TCOL = tierOf, ROMAN, TCOL
 	FS.following, FS.followers, FS.cache = {}, {}, {} -- following[targetId]={n,u}; followers=list; cache[id]={c,t}
 	FS.stamp, FS.loadedF, FS.loading, FS.ok, FS.locked = -1e9, false, false, false, false
+	FS.fcache, FS.profileOK, FS.mirrored = {}, false, false -- fcache[id]={c,t} = how many people `id` follows
+	-- readable reason for a failed Firebase call (includes Firebase's own message)
+	local function whyFail(code, raw, step)
+		local m = type(raw) == "string" and raw:match('"error"%s*:%s*"([^"]+)"') or nil
+		if code == 401 or code == 403 then
+			return "refused by the follower rules at '" .. step .. "' (" .. (m or "Permission denied") .. "). Publish the new rules in sxikiflowsys"
+		end
+		return "HTTP " .. tostring(code) .. " at '" .. step .. "'" .. (m and (" (" .. m .. ")") or "")
+	end
 	local function fsReq(method, path, body, extra) return dbRequest(method, path, body, fsAuth, FS_FIREBASE_DB, extra) end
 	local function myUid()
 		if ensureToken(fsAuth) then return fsAuth.uid end
@@ -1643,26 +1652,48 @@ do
 		return n
 	end
 
+	-- how many people `id` follows (own list is known locally, others come from the /following index)
+	function FS.countFollowing(id, force)
+		if id == ME and FS.loadedF then
+			local n = 0
+			for _ in pairs(FS.following) do n += 1 end
+			return n
+		end
+		local c = FS.fcache[id]
+		if c and not force and os.clock() - c.t < 60 then return c.c end
+		local ok, data = fsReq("GET", "/following/" .. id, nil, "shallow=true")
+		if not ok then return c and c.c or nil end
+		local n = 0
+		if type(data) == "table" then for _ in pairs(data) do n += 1 end end
+		FS.fcache[id] = { c = n, t = os.clock() }
+		return n
+	end
+
 	function FS.writeProfile()
 		local uid = myUid()
 		if not uid then return end
 		local ok, _, _, code = fsReq("PUT", "/profiles/" .. ME, { robloxUserId = LP.UserId, username = cut(LP.Name, 40),
 			displayName = cut(LP.DisplayName, 80), firebaseUid = uid, updatedAt = SV })
 		FS.locked = (not ok) and (code == 401 or code == 403)
+		FS.profileOK = ok and true or false
 	end
 
 	function FS.follow(id, name, user)
 		local uid = myUid()
 		if not uid then return false, "follower system offline (" .. tostring(fsAuth.err) .. ")" end
-		local ok, _, _, code = fsReq("PUT", "/follows/" .. uid .. "/" .. id, { targetRobloxUserId = tonumber(id),
+		if id == ME then return false, "can't follow yourself lol" end
+		if not FS.profileOK then FS.writeProfile() end -- the rules tie every follow to your registered profile
+		if not FS.profileOK then return false, "your profile couldn't be registered" .. (FS.locked and " (it belongs to an older login of yours)" or "") end
+		local ok, _, raw, code = fsReq("PUT", "/follows/" .. uid .. "/" .. id, { targetRobloxUserId = tonumber(id),
 			targetUsername = cut(user or name or "", 40), targetDisplayName = cut(name or user or "", 80), createdAt = SV })
-		if not ok then return false, (code == 401 or code == 403) and "refused by the follower rules" or ("HTTP " .. tostring(code)) end
-		local ok2, _, _, code2 = fsReq("PUT", "/followers/" .. id .. "/" .. uid, { ts = SV, rid = LP.UserId,
+		if not ok then return false, whyFail(code, raw, "follows") end
+		local ok2, _, raw2, code2 = fsReq("PUT", "/followers/" .. id .. "/" .. uid, { ts = SV, rid = ME,
 			un = cut(LP.Name, 40), dn = cut(LP.DisplayName, 80) })
 		if not ok2 then
 			fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
-			return false, (code2 == 401 or code2 == 403) and "refused by the follower rules (add the 'followers' rules)" or ("HTTP " .. tostring(code2))
+			return false, whyFail(code2, raw2, "followers")
 		end
+		fsReq("PUT", "/following/" .. ME .. "/" .. id, { ts = SV }) -- public counter index (best effort)
 		FS.following[id] = { n = name or user or id, u = user or "" }
 		local c = FS.cache[id]
 		if c then c.c = c.c + 1 end
@@ -1674,6 +1705,7 @@ do
 		if not uid then return false, "follower system offline" end
 		local ok = fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
 		local ok2 = fsReq("DELETE", "/followers/" .. id .. "/" .. uid)
+		fsReq("DELETE", "/following/" .. ME .. "/" .. id)
 		if not ok or not ok2 then return false, "couldn't remove it, try again" end
 		FS.following[id] = nil
 		local c = FS.cache[id]
@@ -1697,13 +1729,23 @@ do
 				end
 			end
 			FS.following, FS.loadedF = f, true
+			if not FS.mirrored and FS.profileOK then -- one-time: make sure my follows are in the public /following counter index
+				FS.mirrored = true
+				task.spawn(function()
+					local okm, have = fsReq("GET", "/following/" .. ME, nil, "shallow=true")
+					if not okm then FS.mirrored = false; return end
+					for tid in pairs(f) do
+						if not (type(have) == "table" and have[tid]) then fsReq("PUT", "/following/" .. ME .. "/" .. tid, { ts = SV }) end
+					end
+				end)
+			end
 		end
 		local ok2, d2 = fsReq("GET", "/followers/" .. ME)
 		if ok2 then
 			local list = {}
 			if type(d2) == "table" then
 				for _, r in pairs(d2) do
-					if type(r) == "table" and r.rid then
+					if type(r) == "table" and tonumber(r.rid) then
 						list[#list + 1] = { id = idStr(r.rid), n = tostring(r.dn or r.un or "?"), u = tostring(r.un or ""), ts = tonumber(r.ts) or 0 }
 					end
 				end
@@ -1733,12 +1775,6 @@ do
 		local id = FS.threadId
 		if not id then return end
 		local c = FS.cache[id]
-		local following = FS.following[id] ~= nil
-		followBtn.Text = following and "Following" or "Follow"
-		followBtn.BackgroundTransparency = following and 0.86 or 0
-		local g = followBtn:FindFirstChildOfClass("UIGradient")
-		if g then g.Enabled = not following end
-		followBtn.TextColor3 = following and T.text or WHITE
 		dmSub.Text = c and (c.c .. (c.c == 1 and " follower" or " followers") .. "  •  Tier " .. ROMAN[tierOf(c.c)]) or "…"
 	end
 	function FS.onThread(id, name, user)
@@ -1751,21 +1787,9 @@ do
 			if FS.threadId == id then FS.paintThread() end
 		end)
 	end
-	local pending = false
 	bind(followBtn.Activated, function()
 		local id = FS.threadId
-		if not id or pending or id == ME then return end
-		pending = true
-		followBtn.Text = "…"
-		task.spawn(function()
-			if not FS.loadedF then FS.loadMine() end
-			local ok, why
-			if FS.following[id] then ok, why = FS.unfollow(id) else ok, why = FS.follow(id, FS.threadName, FS.threadUser) end
-			pending = false
-			if FS.threadId == id then FS.paintThread() end
-			if not ok then views.dm.notice("Couldn't update follow: " .. tostring(why)) end
-			FS.render()
-		end)
+		if id and T.openProfile then T.openProfile(id, FS.threadName, FS.threadUser) end
 	end)
 
 	-- ===== Profile tab =====
@@ -1937,11 +1961,8 @@ end
 
 		local folLbl = new("TextLabel", { Position = UDim2.fromOffset(18, 94), Size = UDim2.fromOffset(120, 38), BackgroundTransparency = 1,
 			RichText = true, Text = "", Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
-		local ingLbl
-		if isMe then
-			ingLbl = new("TextLabel", { Position = UDim2.fromOffset(150, 94), Size = UDim2.fromOffset(120, 38), BackgroundTransparency = 1,
-				RichText = true, Text = "", Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
-		end
+		local ingLbl = new("TextLabel", { Position = UDim2.fromOffset(150, 94), Size = UDim2.fromOffset(120, 38), BackgroundTransparency = 1,
+			RichText = true, Text = "", Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
 		local nextLbl = new("TextLabel", { Position = UDim2.fromOffset(18, 136), Size = UDim2.fromOffset(264, 16), BackgroundTransparency = 1,
 			Text = "", Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
 		local bar = new("Frame", { Position = UDim2.fromOffset(18, 156), Size = UDim2.fromOffset(264, 5), BackgroundColor3 = WHITE,
@@ -1978,11 +1999,9 @@ end
 			badge.BackgroundColor3 = TCOL[tier]
 			folLbl.Text = string.format('<font size="20"><b>%s</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWERS</font>',
 				cnt and tostring(cnt) or (done and "—" or "…"))
-			if ingLbl then
-				local n = 0
-				for _ in pairs(FS.following) do n += 1 end
-				ingLbl.Text = string.format('<font size="20"><b>%d</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWING</font>', n)
-			end
+			local fc = (id == ME) and FS.countFollowing(ME) or (FS.fcache[id] and FS.fcache[id].c)
+			ingLbl.Text = string.format('<font size="20"><b>%s</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWING</font>',
+				fc and tostring(fc) or (done and "—" or "…"))
 			local lo, nextAt = CONFIG.TIER_AT[tier], CONFIG.TIER_AT[tier + 1]
 			if cnt and nextAt then
 				nextLbl.Text = (nextAt - cnt) .. " more followers for Tier " .. ROMAN[tier + 1]
@@ -2031,6 +2050,7 @@ end
 					if P.root == root then
 						paint()
 						if not ok then statusLbl.Text = "Couldn't update follow: " .. tostring(why) end
+						if not ok then print("[SaikiChat] follow failed: " .. tostring(why)) end
 					end
 				end)
 			end)
@@ -2045,6 +2065,7 @@ end
 		task.spawn(function()
 			if not FS.loadedF and not FS.loading then FS.loadMine() end
 			FS.count(id, true)
+			if id ~= ME then FS.countFollowing(id, true) end
 			done = true
 			paint()
 		end)
