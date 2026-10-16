@@ -1,5 +1,5 @@
 --[[
-	SAIKI RECHAT V2.3  (client-side, Luau / executor)
+	SAIKI RECHAT V2.4 (client-side, Luau / executor)
 	V2.3 adds: new DM homepage (Recent / In Server / Search), local DM history cache,
 	            lightweight inbox polling, Saiki user directory search.
 	V2.2 adds: long-press / right-click message menu (React, Reply, Copy text).
@@ -21,6 +21,10 @@ local FIREBASE_DB       = "https://sxkicxat-default-rtdb.asia-southeast1.firebas
 local FIREBASE_API_KEY  = "AIzaSyCgvkvar8qhD3zqYC83BW6GHxGQVYoDhrM"
 local DM_FIREBASE_DB    = "https://sxkidirect-default-rtdb.asia-southeast1.firebasedatabase.app"
 local DM_FIREBASE_API_KEY = "AIzaSyALza0_s-MNzaYMrH15WJGAZMJ_RYW4"
+
+if #DM_FIREBASE_API_KEY ~= 39 then
+	warn("[SAIKI RECHAT] DM_FIREBASE_API_KEY is " .. #DM_FIREBASE_API_KEY .. " chars; Firebase web API keys are 39. Re-copy it from Project settings > General.")
+end
 
 local GITHUB_OWNER = "SaikiWithTheBanHammer"
 local STICKER_REPOS = {
@@ -694,17 +698,22 @@ local TABS = { "Saiki Server", "Saiki DMs" }
 local NT = #TABS
 local unread = { false, false }
 local cur, isOpen = 1, false
-local closePicker, closeMenu -- forward
+local closePicker, closeMenu, onShowTab -- forward
 
 local scrim = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "",
 	AutoButtonColor = false, Visible = false, Parent = gui })
 local win = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
-	Size = UDim2.fromScale(0.56, 0.64), BackgroundColor3 = T.bg, BackgroundTransparency = T.bgT,
+	Size = UDim2.fromOffset(475, 375), BackgroundColor3 = T.bg, BackgroundTransparency = T.bgT,
 	GroupTransparency = 1, Visible = false, Parent = gui }, {
 	corner(22), stroke(0.82, 1.2),
-	new("UISizeConstraint", { MinSize = Vector2.new(330, 300), MaxSize = Vector2.new(660, 440) }),
 })
-local winScale = new("UIScale", { Scale = 0.94, Parent = win })
+-- fixed 475x375; on screens too small for that it scales down uniformly instead of clipping
+local function fitScale()
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+	return math.clamp(math.min((vp.X - 24) / 475, (vp.Y - 24) / 375), 0.5, 1)
+end
+local winScale = new("UIScale", { Scale = 0.94 * fitScale(), Parent = win })
 new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = win },
 	{ new("UIGradient", { Rotation = 60, Transparency = NumberSequence.new({
 		NumberSequenceKeypoint.new(0, 0.93), NumberSequenceKeypoint.new(0.5, 0.98), NumberSequenceKeypoint.new(1, 1) }) }) })
@@ -746,6 +755,7 @@ local function showTab(i)
 	for k, b in ipairs(tabBtns) do tween(b, 0.2, { TextColor3 = (k == i) and WHITE or T.mut }) end
 	unread[i] = false
 	updateDots()
+	if onShowTab then onShowTab(i) end
 end
 
 for i, nm in ipairs(TABS) do
@@ -796,7 +806,8 @@ local function setOpen(v)
 	if v then
 		win.Visible, scrim.Visible = true, true
 		tween(win, 0.28, { GroupTransparency = 0 })
-		tween(winScale, 0.34, { Scale = 1 }, Enum.EasingStyle.Back)
+		tween(winScale, 0.34, { Scale = fitScale() }, Enum.EasingStyle.Back)
+		if cur == 2 and onShowTab then onShowTab(2) end
 		if blur then tween(blur, 0.3, { Size = 14 }) end
 		unread[cur] = false
 		updateDots()
@@ -805,7 +816,7 @@ local function setOpen(v)
 		if closeMenu then closeMenu() end
 		scrim.Visible = false
 		tween(win, 0.2, { GroupTransparency = 1 })
-		tween(winScale, 0.2, { Scale = 0.94 })
+		tween(winScale, 0.2, { Scale = 0.94 * fitScale() })
 		if blur then tween(blur, 0.25, { Size = 0 }) end
 		task.delay(0.22, function() if alive and not isOpen then win.Visible = false end end)
 	end
@@ -851,10 +862,11 @@ local function parseReply(m)
 	end
 	return nil
 end
-local function sendFail(view, raw, code)
-	warn("[SAIKI RECHAT] send failed (HTTP " .. tostring(code) .. "): " .. tostring(raw):sub(1, 300))
+local function sendFail(view, raw, code, dbName)
+	warn("[SAIKI RECHAT] send failed on " .. tostring(dbName or "?") .. " (HTTP " .. tostring(code) .. "): " .. tostring(raw):sub(1, 300))
 	local why
-	if code == 401 or code == 403 then why = "Firebase rules/auth denied the write (" .. code .. ")"
+	if code == 401 or code == 403 then
+		why = "Firebase denied the write (" .. code .. "). Publish the latest rules for " .. tostring(dbName or "this database")
 	elseif code == 400 then why = "Firebase rejected the request or API key (400)"
 	elseif not code then why = "auth failed or no response, see F9 console"
 	else why = "HTTP " .. tostring(code) end
@@ -895,7 +907,7 @@ views[1] = ChatView(container, function(p)
 				views[1].add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply, key = res.name })
 			end
 		else
-			sendFail(views[1], raw, code)
+			sendFail(views[1], raw, code, "sxkicxat")
 		end
 	end)
 end, CONFIG.COOLDOWN_SERVER, "Message Saiki Server", function(key, e)
@@ -1012,11 +1024,20 @@ local dmPage = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparen
 pages[2] = dmPage
 
 home = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = dmPage })
-local seg = new("Frame", { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -28, 0, 32), BackgroundColor3 = WHITE,
-	BackgroundTransparency = 0.93, Parent = home }, { corner(16), stroke(0.9) })
-local segInd = new("Frame", { Position = UDim2.new(0, 3, 0, 3), Size = UDim2.new(1 / 3, -6, 1, -6),
-	BackgroundColor3 = WHITE, Parent = seg }, { corner(13), grad(20) })
-local body = new("Frame", { Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 1, -40), BackgroundTransparency = 1, Parent = home })
+local searchBar = new("Frame", { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -28, 0, 36), BackgroundColor3 = WHITE,
+	BackgroundTransparency = 0.92, Parent = home }, { corner(18), stroke(0.88) })
+-- little magnifier drawn from two frames (no font/emoji dependency)
+new("Frame", { Position = UDim2.fromOffset(15, 10), Size = UDim2.fromOffset(12, 12), BackgroundTransparency = 1, Parent = searchBar },
+	{ corner(6), stroke(0.35, 1.6) })
+new("Frame", { Position = UDim2.fromOffset(25, 24), Size = UDim2.fromOffset(7, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.35,
+	Rotation = 45, BorderSizePixel = 0, Parent = searchBar })
+local searchBox = new("TextBox", { Position = UDim2.fromOffset(40, 0), Size = UDim2.new(1, -78, 1, 0), BackgroundTransparency = 1,
+	Text = "", PlaceholderText = "Search any player (name or username)", PlaceholderColor3 = T.mut, TextColor3 = T.text,
+	Font = T.font, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Parent = searchBar })
+local clearBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(24, 24),
+	BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Text = "×", Font = T.fontB, TextSize = 16, TextColor3 = T.text,
+	AutoButtonColor = false, Visible = false, Parent = searchBar }, { corner(12) })
+bind(clearBtn.Activated, function() searchBox.Text = "" end)
 
 local function newScroll(parent)
 	return new("ScrollingFrame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
@@ -1030,12 +1051,16 @@ end
 local function clearList(sf)
 	for _, c in ipairs(sf:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
 end
-local function addHeader(sf, text, order)
-	new("TextLabel", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = string.upper(text), Font = T.fontB,
+local function addHeader(sf, text, order, right)
+	local h = new("TextLabel", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = string.upper(text), Font = T.fontB,
 		TextSize = 11, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order, Parent = sf })
+	if right then
+		new("TextLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = right, Font = T.font, TextSize = 11,
+			TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Right, Parent = h })
+	end
 end
-local function addEmpty(sf, text, order)
-	new("TextLabel", { Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1, Text = text, TextWrapped = true,
+local function addEmpty(sf, text, order, h)
+	new("TextLabel", { Size = UDim2.new(1, 0, 0, h or 60), BackgroundTransparency = 1, Text = text, TextWrapped = true,
 		Font = T.font, TextSize = 13, TextColor3 = T.mut, LayoutOrder = order or 1000, Parent = sf })
 end
 -- one reusable row look for every list
@@ -1059,22 +1084,14 @@ local function makeRow(sf, e, order)
 		new("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -14, 1, -10), Size = UDim2.fromOffset(10, 10),
 			BackgroundColor3 = T.red, Parent = r }, { corner(5) })
 	end
+	if e.unread then r.BackgroundTransparency = 0.88 end
 	r.Activated:Connect(function() openThread(e.id, e.name, e.user) end)
 end
 
-local recentList = newScroll(body)
-local serverList = newScroll(body)
-local searchPage = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = body })
-local searchBar = new("Frame", { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -28, 0, 38), BackgroundColor3 = WHITE,
-	BackgroundTransparency = 0.92, Parent = searchPage }, { corner(19), stroke(0.88) })
-local searchBox = new("TextBox", { Position = UDim2.fromOffset(16, 0), Size = UDim2.new(1, -32, 1, 0), BackgroundTransparency = 1,
-	Text = "", PlaceholderText = "Search any player (name or username)", PlaceholderColor3 = T.mut, TextColor3 = T.text,
-	Font = T.font, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Parent = searchBar })
-local resultsWrap = new("Frame", { Position = UDim2.fromOffset(0, 46), Size = UDim2.new(1, 0, 1, -46), BackgroundTransparency = 1,
-	Parent = searchPage })
-local resultsList = newScroll(resultsWrap)
-local secs = { recentList, serverList, searchPage }
-local secBtns, homeSec = {}, 1
+-- ONE scrolling feed holds everything: In this server strip, Recent chats, or live search results
+local feed = newScroll(home)
+feed.Position, feed.Size = UDim2.fromOffset(0, 44), UDim2.new(1, 0, 1, -44)
+local searchQ, lastCands, lastPending = "", nil, false
 
 -- ===== directory (Saiki users), friends, Roblox search =====
 local function syncDirectory()
@@ -1168,7 +1185,7 @@ local function searchLocal(q)
 end
 local HINT = "Search your history, friends, Saiki users, this server and all of Roblox."
 local function renderResults(cands, pending)
-	clearList(resultsList)
+	clearList(feed)
 	local arr = {}
 	for _, c in pairs(cands) do arr[#arr + 1] = c end
 	table.sort(arr, function(a, b)
@@ -1180,27 +1197,32 @@ local function renderResults(cands, pending)
 	local lastTier, order = 0, 0
 	for i, c in ipairs(arr) do
 		if i > 40 then break end
-		if c.tier ~= lastTier then lastTier = c.tier; order += 1; addHeader(resultsList, heads[c.tier], order) end
+		if c.tier ~= lastTier then lastTier = c.tier; order += 1; addHeader(feed, heads[c.tier], order) end
 		order += 1
 		local tags = {}
 		for _, t in ipairs({ "Recent", "Friend", "In server", "On Saiki", "Roblox" }) do if c.tags[t] then tags[#tags + 1] = t end end
 		local who = (c.user and c.user ~= "") and ("@" .. c.user .. "  •  ") or ""
-		makeRow(resultsList, { id = c.id, name = c.name, user = c.user, sub = who .. table.concat(tags, " • "),
+		makeRow(feed, { id = c.id, name = c.name, user = c.user, sub = who .. table.concat(tags, " • "),
 			unread = isUnread(c.id) }, order)
 	end
-	if #arr == 0 and not pending then addEmpty(resultsList, "No matches.", 1) end
-	if pending then addEmpty(resultsList, "Searching Roblox…", 999) end
+	if #arr == 0 and not pending then addEmpty(feed, "No matches.", 1) end
+	if pending then addEmpty(feed, "Searching Roblox…", 999) end
 end
 local searchTok, lastApi = 0, 0
+local buildHome -- forward
 local function runSearch()
 	searchTok += 1
 	local tok = searchTok
 	local q = searchBox.Text:match("^%s*(.-)%s*$") or ""
-	if q == "" then clearList(resultsList); addEmpty(resultsList, HINT, 1); return end
+	searchQ = q
+	clearBtn.Visible = searchBox.Text ~= ""
+	if q == "" then lastCands, lastPending = nil, false; buildHome(); return end
 	task.delay(0.2, function() -- debounce typing
 		if tok ~= searchTok or not alive then return end
 		local cands = searchLocal(q)
 		local wantApi = #q >= 3 and REQUEST ~= nil
+		lastCands, lastPending = cands, wantApi
+		feed.CanvasPosition = Vector2.new(0, 0)
 		renderResults(cands, wantApi)
 		if not wantApi then return end
 		task.delay(0.5, function()
@@ -1211,36 +1233,48 @@ local function runSearch()
 			lastApi = os.clock()
 			for _, r in ipairs(robloxSearch(q)) do consider(cands, r.id, r.d, r.n, 4, "Roblox", q) end
 			if tok ~= searchTok or not alive then return end
+			lastPending = false
 			renderResults(cands, false)
 		end)
 	end)
 end
 bind(searchBox:GetPropertyChangedSignal("Text"), runSearch)
 
--- ===== Recent + In Server lists =====
-local function buildRecent()
-	clearList(recentList)
-	local arr = {}
-	for pid, e in pairs(index) do if e.l then arr[#arr + 1] = { id = pid, e = e } end end
-	table.sort(arr, function(a, b) return (a.e.ts or 0) > (b.e.ts or 0) end)
-	if #arr == 0 then addEmpty(recentList, "No conversations yet.\nStart one from In Server or Search.", 1); return end
-	for i, it in ipairs(arr) do
-		if i > 60 then break end
-		local e = it.e
-		makeRow(recentList, { id = it.id, name = e.n or ("User " .. it.id), user = e.u, ts = e.ts,
-			sub = (e.me and "You: " or "") .. (e.x or ""), unread = isUnread(it.id) }, i)
+-- ===== home feed: "In this server" strip + "Recent" chats (one page) =====
+local GREEN = Color3.fromRGB(80, 220, 140)
+local function addStrip(sf, arr, order)
+	local strip = new("ScrollingFrame", { Size = UDim2.new(1, 0, 0, 84), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 0, ScrollingDirection = Enum.ScrollingDirection.X, CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.X, LayoutOrder = order, Parent = sf },
+		{ new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8) }) })
+	for i, e in ipairs(arr) do
+		local c = new("TextButton", { Size = UDim2.fromOffset(70, 80), BackgroundColor3 = WHITE, BackgroundTransparency = e.unread and 0.88 or 0.94,
+			Text = "", AutoButtonColor = false, LayoutOrder = i, Parent = strip }, { corner(14), stroke(0.92) })
+		new("ImageLabel", { Position = UDim2.fromOffset(15, 8), Size = UDim2.fromOffset(40, 40), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Image = thumb(e.id), Parent = c }, { corner(20) })
+		if e.saiki then
+			new("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromOffset(57, 50), Size = UDim2.fromOffset(11, 11),
+				BackgroundColor3 = GREEN, Parent = c }, { corner(6), new("UIStroke", { Color = T.bg, Thickness = 2 }) })
+		end
+		if e.unread then
+			new("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -6, 0, 6), Size = UDim2.fromOffset(9, 9),
+				BackgroundColor3 = T.red, Parent = c }, { corner(5) })
+		end
+		new("TextLabel", { Position = UDim2.fromOffset(4, 54), Size = UDim2.new(1, -8, 0, 18), BackgroundTransparency = 1, Text = e.name,
+			Font = T.fontB, TextSize = 11, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, Parent = c })
+		c.Activated:Connect(function() openThread(e.id, e.name, e.user) end)
 	end
 end
-local function buildServer()
-	clearList(serverList)
+
+function buildHome()
+	local keep = feed.CanvasPosition
+	clearList(feed)
+	-- players in this server (history / friends / Saiki users first)
 	local arr = {}
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= LP then
 			local id = tostring(p.UserId)
-			local tags = {}
-			if friends[id] then tags[#tags + 1] = "Friend" end
-			tags[#tags + 1] = directory[id] and "On Saiki" or "Not on Saiki yet"
-			arr[#arr + 1] = { id = id, name = p.DisplayName, user = p.Name, sub = table.concat(tags, " • "), unread = isUnread(id),
+			arr[#arr + 1] = { id = id, name = p.DisplayName, user = p.Name, unread = isUnread(id), saiki = directory[id] ~= nil,
 				rank = (index[id] and 4 or 0) + (friends[id] and 2 or 0) + (directory[id] and 1 or 0) }
 		end
 	end
@@ -1248,34 +1282,37 @@ local function buildServer()
 		if a.rank ~= b.rank then return a.rank > b.rank end
 		return a.name:lower() < b.name:lower()
 	end)
-	if #arr == 0 then addEmpty(serverList, "No other players in this server.", 1); return end
-	for i, e in ipairs(arr) do makeRow(serverList, e, i) end
+	addHeader(feed, "In this server", 1, (#arr > 0) and (#arr .. " here  •  ● on Saiki") or nil)
+	if #arr == 0 then addEmpty(feed, "No other players in this server.", 2, 34) else addStrip(feed, arr, 2) end
+	-- recent conversations
+	local rec = {}
+	for pid, e in pairs(index) do if e.l then rec[#rec + 1] = { id = pid, e = e } end end
+	table.sort(rec, function(a, b) return (a.e.ts or 0) > (b.e.ts or 0) end)
+	addHeader(feed, "Recent", 3, (#rec > 0) and tostring(#rec) or nil)
+	if #rec == 0 then
+		addEmpty(feed, "No conversations yet.\nTap a player above or use search to start one.", 4, 64)
+	else
+		for i, it in ipairs(rec) do
+			if i > 60 then break end
+			local e = it.e
+			makeRow(feed, { id = it.id, name = e.n or ("User " .. it.id), user = e.u, ts = e.ts,
+				sub = (e.me and "You: " or "") .. (e.x or ""), unread = isUnread(it.id) }, 10 + i)
+		end
+	end
+	feed.CanvasPosition = keep
 end
 
-local function showHome(i)
-	homeSec = i
-	for k, sec in ipairs(secs) do sec.Visible = (k == i) end
-	tween(segInd, 0.3, { Position = UDim2.new((i - 1) / 3, 3, 0, 3) })
-	for k, b in ipairs(secBtns) do tween(b, 0.2, { TextColor3 = (k == i) and WHITE or T.mut }) end
-	if i == 1 then buildRecent()
-	elseif i == 2 then buildServer()
+function refreshHome()
+	if searchQ ~= "" then
+		if lastCands then renderResults(lastCands, lastPending) end
 	else
-		if searchBox.Text == "" then clearList(resultsList); addEmpty(resultsList, HINT, 1) end
-		pcall(function() searchBox:CaptureFocus() end)
+		buildHome()
 	end
 end
-function refreshHome()
-	if homeSec == 1 then buildRecent() elseif homeSec == 2 then buildServer() end
-end
-for i, nm in ipairs({ "Recent", "In Server", "Search" }) do
-	local b = new("TextButton", { Size = UDim2.new(1 / 3, 0, 1, 0), Position = UDim2.new((i - 1) / 3, 0, 0, 0),
-		BackgroundTransparency = 1, Text = nm, Font = T.fontB, TextSize = 13, AutoButtonColor = false, ZIndex = 2,
-		TextColor3 = (i == 1) and WHITE or T.mut, Parent = seg })
-	secBtns[i] = b
-	b.Activated:Connect(function() showHome(i) end)
-end
-bind(Players.PlayerAdded, function() if homeSec == 2 and home.Visible then refreshHome() end end)
-bind(Players.PlayerRemoving, function() task.delay(0.2, function() if alive and homeSec == 2 and home.Visible then refreshHome() end end) end)
+onShowTab = function(i) if i == 2 and home.Visible then refreshHome() end end
+local function homeLive() return alive and isOpen and cur == 2 and home.Visible end
+bind(Players.PlayerAdded, function() if homeLive() and searchQ == "" then refreshHome() end end)
+bind(Players.PlayerRemoving, function() task.delay(0.2, function() if homeLive() and searchQ == "" then refreshHome() end end) end)
 
 -- ===== thread (chat view) =====
 local thread = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = dmPage })
@@ -1327,7 +1364,7 @@ views.dm = ChatView(thread, function(p)
 			-- tiny "inbox" ping so the other person only needs ONE cheap request to learn about new DMs
 			dbRequest("PUT", "/dminbox/" .. partner .. "/" .. ME, { ts = SV, k = res.name }, dmAuth, DM_FIREBASE_DB)
 		else
-			sendFail(views.dm, raw, code)
+			sendFail(views.dm, raw, code, "sxkidirect")
 		end
 	end)
 end, CONFIG.COOLDOWN_DM, "Message", function(key, e)
@@ -1456,7 +1493,7 @@ local function discoverLegacy()
 	refreshUnread()
 end
 
-showHome(next(index) and 1 or 2)
+refreshHome()
 refreshUnread()
 
 ----------------------------------------------------------------- sticker picker
@@ -1643,6 +1680,7 @@ task.spawn(function()
 			if n == 3 or n % 360 == 0 then syncDirectory() end -- Saiki users list (only changes since last sync)
 			if n == 4 then task.spawn(writeMyProfile) end
 			if n == 5 then task.spawn(loadFriends) end
+			if n == 7 and home.Visible and isOpen and cur == 2 then refreshHome() end -- friends / directory just arrived
 		end
 		if n % 2 == 0 then flushAll(false) end
 		task.wait(CONFIG.POLL)
