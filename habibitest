@@ -1672,18 +1672,17 @@ do
 	function FS.writeProfile()
 		local uid = myUid()
 		if not uid then return end
-		local ok, _, _, code = fsReq("PUT", "/profiles/" .. ME, { robloxUserId = LP.UserId, username = cut(LP.Name, 40),
+		local ok, _, raw, code = fsReq("PUT", "/profiles/" .. ME, { robloxUserId = LP.UserId, username = cut(LP.Name, 40),
 			displayName = cut(LP.DisplayName, 80), firebaseUid = uid, updatedAt = SV })
 		FS.locked = (not ok) and (code == 401 or code == 403)
 		FS.profileOK = ok and true or false
+		if not ok then warn("[SAIKI RECHAT] profile not saved: " .. whyFail(code, raw, "profiles")) end
 	end
 
 	function FS.follow(id, name, user)
 		local uid = myUid()
 		if not uid then return false, "follower system offline (" .. tostring(fsAuth.err) .. ")" end
 		if id == ME then return false, "can't follow yourself lol" end
-		if not FS.profileOK then FS.writeProfile() end -- the rules tie every follow to your registered profile
-		if not FS.profileOK then return false, "your profile couldn't be registered" .. (FS.locked and " (it belongs to an older login of yours)" or "") end
 		local ok, _, raw, code = fsReq("PUT", "/follows/" .. uid .. "/" .. id, { targetRobloxUserId = tonumber(id),
 			targetUsername = cut(user or name or "", 40), targetDisplayName = cut(name or user or "", 80), createdAt = SV })
 		if not ok then return false, whyFail(code, raw, "follows") end
@@ -1693,7 +1692,8 @@ do
 			fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
 			return false, whyFail(code2, raw2, "followers")
 		end
-		fsReq("PUT", "/following/" .. ME .. "/" .. id, { ts = SV }) -- public counter index (best effort)
+		if not FS.profileOK then FS.writeProfile() end
+		if FS.profileOK then fsReq("PUT", "/following/" .. ME .. "/" .. id, { ts = SV }) end -- public counter index (best effort)
 		FS.following[id] = { n = name or user or id, u = user or "" }
 		local c = FS.cache[id]
 		if c then c.c = c.c + 1 end
@@ -1868,7 +1868,7 @@ do
 		if not FS.ok and not fsAuth.token then
 			addEmpty(sc, "Follower system offline: " .. tostring(fsAuth.err or "connecting…"), 2, 40)
 		elseif FS.locked then
-			addEmpty(sc, "Your follower profile is tied to an older login on this account. Following still works.", 2, 40)
+			addEmpty(sc, "Your profile entry belongs to an older login, so your public Following count can't update. Following itself works.", 2, 40)
 		end
 
 		addHeader(sc, "Following", 10, tostring(nFollowing))
