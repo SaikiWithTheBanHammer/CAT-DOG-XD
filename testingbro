@@ -499,6 +499,7 @@ end
 
 ----------------------------------------------------------------- chat view (bubbles, stickers, grouping)
 local openMenu -- forward (defined near the sticker picker)
+local openUserProfile -- opens a compact profile card from a chat avatar
 local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 	local self = { lastUid = nil, lastTs = 0, rows = {}, n = 0, items = {}, reacts = {}, mineLock = {}, replyTo = nil }
 	local root = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = parent })
@@ -682,8 +683,14 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 		local av = new("Frame", { Size = UDim2.fromOffset(avW, 30), BackgroundTransparency = 1,
 			LayoutOrder = mine and 2 or 1, Parent = row })
 		if newGroup and avW > 0 then
-			new("ImageLabel", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.88,
-				Image = thumb(m.uid), Parent = av }, { corner(15) })
+			local avatar = new("ImageButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE,
+				BackgroundTransparency = 0.88, Image = thumb(m.uid), AutoButtonColor = false,
+				Active = true, Parent = av }, { corner(15) })
+			avatar.Activated:Connect(function()
+				if openUserProfile and tostring(m.uid) ~= ME then
+					openUserProfile(tostring(m.uid), tostring(m.name or "Player"))
+				end
+			end)
 		end
 		local col = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
 			LayoutOrder = mine and 1 or 2, Parent = row }, {
@@ -1754,6 +1761,113 @@ do
 			FS.render()
 		end)
 	end)
+
+
+	-- ===== Chat avatar profile card (keeps the existing chat and tabs intact) =====
+	local userProfileCard
+	local function closeUserProfile()
+		local old = userProfileCard
+		if not old then return end
+		userProfileCard = nil
+		tween(old, 0.16, { GroupTransparency = 1 })
+		task.delay(0.18, function() if old.Parent then old:Destroy() end end)
+	end
+
+	openUserProfile = function(id, displayName)
+		id = tostring(id or "")
+		if id == "" or id == ME then return end
+		if userProfileCard then closeUserProfile() end
+		if closeMenu then closeMenu() end
+		if closePicker then closePicker() end
+
+		local pl = Players:GetPlayerByUserId(tonumber(id))
+		local username = pl and pl.Name or (directory[id] and directory[id].n) or ""
+		local shownName = (pl and pl.DisplayName) or (directory[id] and directory[id].d) or displayName or "Player"
+		local overlay = new("CanvasGroup", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+			BackgroundTransparency = 0.48, GroupTransparency = 1, ZIndex = 40, Parent = win })
+		userProfileCard = overlay
+		local card = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(310, 238), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02,
+			ZIndex = 41, Parent = overlay }, { corner(22), stroke(0.78, 1.2) })
+		local close = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 10),
+			Size = UDim2.fromOffset(28, 28), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9,
+			Text = "×", Font = T.fontB, TextSize = 20, TextColor3 = T.text, AutoButtonColor = false,
+			ZIndex = 42, Parent = card }, { corner(14) })
+		close.Activated:Connect(closeUserProfile)
+		new("ImageLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 22),
+			Size = UDim2.fromOffset(66, 66), BackgroundColor3 = WHITE, BackgroundTransparency = 0.86,
+			Image = thumb(id), ZIndex = 42, Parent = card }, { corner(33), stroke(0.72) })
+		new("TextLabel", { Position = UDim2.new(0, 18, 0, 96), Size = UDim2.new(1, -36, 0, 24),
+			BackgroundTransparency = 1, Text = shownName, Font = T.fontB, TextSize = 18, TextColor3 = T.text,
+			TextXAlignment = Enum.TextXAlignment.Center, TextTruncate = Enum.TextTruncate.AtEnd,
+			ZIndex = 42, Parent = card })
+		new("TextLabel", { Position = UDim2.new(0, 18, 0, 120), Size = UDim2.new(1, -36, 0, 18),
+			BackgroundTransparency = 1, Text = username ~= "" and ("@" .. username) or ("User ID: " .. id),
+			Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Center,
+			TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 42, Parent = card })
+		local stats = new("TextLabel", { Position = UDim2.new(0, 18, 0, 141), Size = UDim2.new(1, -36, 0, 18),
+			BackgroundTransparency = 1, Text = "Loading follower info…", Font = T.font, TextSize = 12,
+			TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 42, Parent = card })
+
+		local follow = new("TextButton", { Position = UDim2.new(0, 18, 1, -54), Size = UDim2.new(0.5, -24, 0, 36),
+			BackgroundColor3 = WHITE, BackgroundTransparency = 0.05, Text = "Follow", Font = T.fontB, TextSize = 13,
+			TextColor3 = WHITE, AutoButtonColor = false, ZIndex = 42, Parent = card }, { corner(18), grad(0) })
+		local dmButton = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 1, -54),
+			Size = UDim2.new(0.5, -24, 0, 36), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9,
+			Text = "DM", Font = T.fontB, TextSize = 13, TextColor3 = T.text, AutoButtonColor = false,
+			ZIndex = 42, Parent = card }, { corner(18), stroke(0.82) })
+
+		local busy = false
+		local function paint()
+			local count = FS.cache[id] and FS.cache[id].c
+			local following = FS.following[id] ~= nil
+			follow.Text = following and "Unfollow" or "Follow"
+			follow.BackgroundTransparency = following and 0.88 or 0.05
+			local g = follow:FindFirstChildOfClass("UIGradient")
+			if g then g.Enabled = not following end
+			stats.Text = count ~= nil and (tostring(count) .. (count == 1 and " follower" or " followers") ..
+				"  •  Tier " .. ({ "I", "II", "III", "IV", "V" })[FS.tierOf(count)]) or "Follower count unavailable"
+		end
+		follow.Activated:Connect(function()
+			if busy then return end
+			busy = true
+			follow.Text = "…"
+			task.spawn(function()
+				if not FS.loadedF then FS.loadMine() end
+				local ok, why
+				if FS.following[id] then ok, why = FS.unfollow(id)
+				else ok, why = FS.follow(id, shownName, username) end
+				busy = false
+				if userProfileCard == overlay then
+					paint()
+					if not ok then stats.Text = "Follow failed: " .. tostring(why) end
+				end
+				if FS.render then FS.render() end
+				if FS.paintThread then FS.paintThread() end
+			end)
+		end)
+		dmButton.Activated:Connect(function()
+			closeUserProfile()
+			showTab(2)
+			openThread(id, shownName, username)
+		end)
+		overlay.Activated:Connect(function() closeUserProfile() end)
+		card.InputBegan:Connect(function(input) -- keep card taps from closing the overlay
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				-- intentionally handled by controls inside the card
+			end
+		end)
+		paint()
+		task.spawn(function()
+			if not FS.loadedF and not FS.loading then FS.loadMine() end
+			local count = FS.count(id, true)
+			if userProfileCard == overlay then
+				paint()
+				if count == nil then stats.Text = "Follower count unavailable" end
+			end
+		end)
+		tween(overlay, 0.18, { GroupTransparency = 0 })
+	end
 
 	-- ===== Profile tab =====
 	local page = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
