@@ -1,0 +1,2257 @@
+--[[
+	SAIKI RECHAT V2.6 (client-side, Luau / executor)
+	V2.6 adds: tap anyone's profile picture (server chat or DMs, yourself included) to open a profile card
+	            with Follow/Unfollow + DM buttons. Server chat is now strictly same-server: it needs 2+ players
+	            in the server to send, and only shows messages from players who are in this server with you.
+	V2.3 adds: new DM homepage (Recent / In Server / Search), local DM history cache,
+	            lightweight inbox polling, Saiki user directory search.
+	V2.2 adds: long-press / right-click message menu (React, Reply, Copy text).
+	V2.1 adds: Identity Guard (spoof kick), Roblox API consistency check, ban list.
+	Changes from V1:
+	  - Ingame Chat tab removed (Roblox's own chat stays as it is)
+	  - Chat button now sits BELOW Roblox's menu (settings) button
+	  - Uses the original Saiki Firebase databases + anonymous auth
+	  - Stickers: GitHub picker, persistent local cache, sendable in Server + DMs
+	Tabs: Saiki Server | Saiki DMs
+	Needs executor functions: request/http_request. Stickers also need
+	writefile/readfile/isfile/getcustomasset (otherwise stickers show as "[sticker]").
+]]
+
+repeat task.wait() until game:IsLoaded()
+
+----------------------------------------------------------------- config
+local FIREBASE_DB       = "https://sxkicxat-default-rtdb.asia-southeast1.firebasedatabase.app"
+local FIREBASE_API_KEY  = "AIzaSyCgvkvar8qhD3zqYC83BW6GHxGQVYoDhrM"
+local DM_FIREBASE_DB    = "https://sxkidirect-default-rtdb.asia-southeast1.firebasedatabase.app"
+local DM_FIREBASE_API_KEY = "AIzaSyALza0_S-MNAmZanYMrH15WJGAZMJ_RYW4"
+
+if #DM_FIREBASE_API_KEY ~= 39 then
+	warn("[SAIKI RECHAT] DM_FIREBASE_API_KEY is " .. #DM_FIREBASE_API_KEY .. " chars; Firebase web API keys are 39. Re-copy it from Project settings > General.")
+end
+
+local FS_FIREBASE_DB      = "https://sxikiflowsys-default-rtdb.asia-southeast1.firebasedatabase.app"
+local FS_FIREBASE_API_KEY = "AIzaSyCtdBWbOKA2dsjvhuPG-OoyjEiP6QTbsUM"
+
+local GITHUB_OWNER = "SaikiWithTheBanHammer"
+local STICKER_REPOS = {
+	{ name = "Joined",   repo = "Joined-XD" },
+	{ name = "Drawing",  repo = "Drawing-XD" },
+	{ name = "Cartoon",  repo = "Cartoon-XD" },
+	{ name = "Anime",    repo = "Anime-XD" },
+	{ name = "Saiki",    repo = "Saiki-XD" },
+	{ name = "Cat/Dog",  repo = "CAT-DOG-XD" },
+	{ name = "Misc",     repo = "Misclaneous-XD" },
+}
+local CACHE = "SaikiChatHubCache"
+local STICKER_CACHE = CACHE .. "/stickers"
+
+local CONFIG = {
+	POLL = 2.5,              -- seconds per scheduler tick
+	HISTORY = 40,            -- messages loaded when a stream starts
+	MAX_MESSAGES = 80,       -- rows kept per chat view
+	MAX_LEN = 200,
+	COOLDOWN_SERVER = 3,
+	COOLDOWN_DM = 3,
+	GROUP_WINDOW = 90,       -- same sender within N seconds = grouped (no repeat pfp/name)
+	SHOW_OWN_AVATAR = true,
+	BLUR_BACKGROUND = true,
+	HIDE_ROBLOX_CHAT = false, -- false = leave Roblox's normal chat alone
+	BUTTON_X = 12,           -- chat button position (pixels): X from left
+	BUTTON_GAP = 8,          -- pixels below the Roblox topbar
+	DM_KEEP = 200,            -- messages kept per DM on this device
+	DM_SHOW = 60,             -- messages drawn when a DM opens (older stay on disk)
+	STICKER_LIST_TTL = 86400, -- seconds before re-checking GitHub for new stickers
+	TIER_AT = { 0, 30, 60, 90, 120 }, -- followers needed for Tier I, II, III, IV, V (edit freely)
+	-- security
+	IDENTITY_INTERVAL = 45,   -- seconds between identity checks
+	AGE_TOLERANCE_DAYS = 3,   -- allowed difference between in-game and Roblox-API account age
+	REQUIRE_API = false,      -- true = refuse to start if the Roblox API can't be reached
+	BAN_LIST_URL = "",        -- raw GitHub JSON you control: {"ids":[123,456],"hwids":["sha256..."]}
+}
+local BANNED_USER_IDS = {     -- hardcoded bans: [userId] = true
+	-- [1234567890] = true,
+}
+
+----------------------------------------------------------------- services
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui       = game:GetService("StarterGui")
+local TextChatService  = game:GetService("TextChatService")
+local GuiService       = game:GetService("GuiService")
+local HttpService      = game:GetService("HttpService")
+local RunService       = game:GetService("RunService")
+local Lighting         = game:GetService("Lighting")
+local LP = Players.LocalPlayer
+
+local genv = (getgenv and getgenv()) or _G
+if genv.SaikiRechat then pcall(genv.SaikiRechat.Destroy) end
+
+local alive = true
+local conns = {}
+local function bind(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c; return c end
+
+local REQUEST = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
+local JOB = (game.JobId ~= "" and game.JobId) or "studio"
+local SV = { [".sv"] = "timestamp" }
+local ME = tostring(LP.UserId)
+
+----------------------------------------------------------------- theme + helpers
+local WHITE = Color3.new(1, 1, 1)
+local T = {
+	bg = Color3.fromRGB(14, 16, 24), bgT = 0.2,
+	text = Color3.fromRGB(240, 242, 250), mut = Color3.fromRGB(150, 156, 175),
+	accA = Color3.fromRGB(124, 92, 255), accB = Color3.fromRGB(64, 180, 255),
+	red = Color3.fromRGB(255, 82, 110),
+	font = Enum.Font.GothamMedium, fontB = Enum.Font.GothamBold,
+}
+local function new(class, props, kids)
+	local o = Instance.new(class)
+	local parent
+	for k, v in pairs(props or {}) do
+		if k == "Parent" then parent = v else o[k] = v end
+	end
+	for _, c in ipairs(kids or {}) do c.Parent = o end
+	if parent then o.Parent = parent end
+	return o
+end
+local function corner(r) return new("UICorner", { CornerRadius = UDim.new(0, r) }) end
+local function stroke(t, th)
+	return new("UIStroke", { Color = WHITE, Transparency = t or 0.86, Thickness = th or 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+end
+local function pad(v, h)
+	return new("UIPadding", { PaddingTop = UDim.new(0, v), PaddingBottom = UDim.new(0, v),
+		PaddingLeft = UDim.new(0, h), PaddingRight = UDim.new(0, h) })
+end
+local function grad(rot)
+	return new("UIGradient", { Color = ColorSequence.new(T.accA, T.accB), Rotation = rot or 25 })
+end
+local function tween(o, t, props, style, dir)
+	TweenService:Create(o, TweenInfo.new(t, style or Enum.EasingStyle.Quint,
+		dir or Enum.EasingDirection.Out), props):Play()
+end
+local function thumb(uid) return ("rbxthumb://type=AvatarHeadShot&id=%s&w=100&h=100"):format(tostring(uid)) end
+local function enc(v) return HttpService:UrlEncode(tostring(v)) end
+local function clean(s)
+	s = tostring(s or ""):gsub("%c", " "):gsub("%s+", " ")
+	s = s:match("^%s*(.-)%s*$") or ""
+	local ok, cut = pcall(utf8.offset, s, CONFIG.MAX_LEN + 1)
+	if ok and cut then s = s:sub(1, cut - 1) end
+	return s
+end
+local function cut(s, n)
+	s = tostring(s or "")
+	local ok, pos = pcall(utf8.offset, s, n + 1)
+	if ok and pos then return s:sub(1, pos - 1) end
+	return s
+end
+local REACTIONS = { "👍", "😍", "😂", "😮", "😢", "🔥" }
+local ALLOWED_REACT = {}
+for _, e in ipairs(REACTIONS) do ALLOWED_REACT[e] = true end
+local function safeName(s) return (tostring(s):gsub("[^%w_%-%.]", "_")) end
+
+----------------------------------------------------------------- Firebase (anonymous auth, 3 projects)
+-- Each project gets one session object. The anonymous login is SAVED to disk (refresh token), so the same
+-- Firebase uid is reused every launch (no sign-up spam / rate limits, and follower data stays yours).
+local auth, dmAuth, fsAuth, ensureToken -- filled in below
+
+local function requestJSON(method, url, body, headers)
+	if not REQUEST then return false, nil, "no request function" end
+	local opts = { Url = url, Method = method, Headers = { ["Content-Type"] = "application/json" } }
+	if headers then for k, v in pairs(headers) do opts.Headers[k] = v end end
+	if body ~= nil then opts.Body = (type(body) == "string") and body or HttpService:JSONEncode(body) end
+	local ok, res = pcall(REQUEST, opts)
+	if not ok or not res then return false, nil, tostring(res) end
+	local code = tonumber(res.StatusCode or res.Status or 0) or 0
+	local raw = res.Body or res.body or ""
+	local decoded
+	if raw ~= "" then pcall(function() decoded = HttpService:JSONDecode(raw) end) end
+	return code >= 200 and code < 300, decoded, raw, code
+end
+
+local function dbURL(base, path, token, extra)
+	local url, q = base .. path .. ".json", {}
+	if token and token ~= "" then q[#q + 1] = "auth=" .. enc(token) end
+	if extra and extra ~= "" then q[#q + 1] = extra end
+	if #q > 0 then url = url .. "?" .. table.concat(q, "&") end
+	return url
+end
+
+do -- login helpers stay private to this block (keeps the script under Luau's 200-local limit)
+local function newAuth(name, key)
+	return { name = name, key = key, token = nil, refresh = nil, uid = nil, exp = 0, busy = false, loaded = false, err = nil }
+end
+auth = newAuth("sxkicxat", FIREBASE_API_KEY)
+dmAuth = newAuth("sxkidirect", DM_FIREBASE_API_KEY)
+fsAuth = newAuth("sxikiflowsys", FS_FIREBASE_API_KEY)
+
+local function sessionPath(t) return CACHE .. "/session_" .. t.name .. "_" .. ME .. ".json" end
+local function loadSession(t)
+	if not (isfile and readfile) then return end
+	pcall(function()
+		if not isfile(sessionPath(t)) then return end
+		local d = HttpService:JSONDecode(readfile(sessionPath(t)))
+		if type(d) == "table" and type(d.refresh) == "string" and d.refresh ~= "" then
+			t.refresh, t.uid = d.refresh, d.uid
+		end
+	end)
+end
+local function saveSession(t)
+	if not writefile or not t.refresh then return end
+	pcall(function()
+		if makefolder and isfolder and not isfolder(CACHE) then makefolder(CACHE) end
+		writefile(sessionPath(t), HttpService:JSONEncode({ refresh = t.refresh, uid = t.uid }))
+	end)
+end
+
+local function errText(data, raw)
+	if type(data) == "table" and type(data.error) == "table" and data.error.message then return tostring(data.error.message):sub(1, 120) end
+	return tostring(raw or "no response"):sub(1, 120)
+end
+local function applyToken(t, idToken, refresh, uid, expires)
+	t.token = idToken
+	if refresh then t.refresh = refresh end
+	if uid then t.uid = uid end
+	t.exp = os.time() + (tonumber(expires) or 3600) - 180 -- renew 3 minutes BEFORE it expires
+	t.err = nil
+end
+local function signUp(t)
+	local ok, data, raw = requestJSON("POST", "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=" .. t.key, { returnSecureToken = true })
+	if ok and type(data) == "table" and data.idToken then
+		applyToken(t, data.idToken, data.refreshToken, data.localId, data.expiresIn)
+		saveSession(t)
+		return true
+	end
+	t.err = errText(data, raw)
+	return false
+end
+local function refreshTok(t)
+	if not t.refresh then return false end
+	local ok, data, raw, code = requestJSON("POST", "https://securetoken.googleapis.com/v1/token?key=" .. t.key,
+		"grant_type=refresh_token&refresh_token=" .. enc(t.refresh), { ["Content-Type"] = "application/x-www-form-urlencoded" })
+	if ok and type(data) == "table" and data.id_token then
+		applyToken(t, data.id_token, data.refresh_token, data.user_id, data.expires_in)
+		saveSession(t)
+		return true
+	end
+	t.err = errText(data, raw)
+	-- only a definite "this login is dead" answer discards the saved login; network hiccups keep it
+	if code == 400 then t.refresh = nil end
+	return false
+end
+
+-- Make sure t.token is valid. Single-flight: parallel callers wait for ONE login instead of each signing up.
+-- force=true + badToken: the server rejected badToken, so renew (unless someone already did).
+function ensureToken(t, force, badToken)
+	if not force and t.token and os.time() < t.exp then return true end
+	local waited = 0
+	while t.busy and waited < 20 do task.wait(0.1); waited = waited + 0.1 end
+	if force and t.token and t.token ~= badToken and os.time() < t.exp then return true end
+	if not force and t.token and os.time() < t.exp then return true end
+	t.busy = true
+	if not t.loaded then t.loaded = true; loadSession(t) end
+	local ok = false
+	for attempt = 1, 4 do
+		if t.refresh then
+			if refreshTok(t) then ok = true; break end
+		end
+		if not t.refresh then
+			if signUp(t) then ok = true; break end
+		end
+		task.wait(0.5 * attempt)
+	end
+	t.busy = false
+	return ok
+end
+
+end -- login helpers
+
+local function dbRequest(method, path, body, target, base, extra)
+	target, base = target or auth, base or FIREBASE_DB
+	if not ensureToken(target) then return false, nil, "auth failed: " .. tostring(target.err), nil end
+	local used, refreshed, tries = target.token, false, 0
+	local ok, data, raw, code
+	while true do
+		tries = tries + 1
+		ok, data, raw, code = requestJSON(method, dbURL(base, path, used, extra), body)
+		if ok then break end
+		if code == 401 and not refreshed then
+			refreshed = true -- token may have just expired: renew once and retry
+			if not ensureToken(target, true, used) then break end
+			used = target.token
+		elseif tries < 3 and (code == nil or code == 0 or code == 429 or code >= 500) then
+			task.wait(0.5 * tries) -- transient network / server hiccup
+		else
+			break
+		end
+	end
+	return ok, data, raw, code
+end
+
+-- log in to all three projects right away so the first message never waits on a login
+if REQUEST then
+	task.spawn(function() ensureToken(auth); ensureToken(dmAuth); ensureToken(fsAuth) end)
+end
+
+----------------------------------------------------------------- persistent cache + stickers
+local function ensureFolder(path)
+	if not makefolder then return end
+	local cur = ""
+	for part in string.gmatch(path, "[^/]+") do
+		cur = (cur == "") and part or (cur .. "/" .. part)
+		if not (isfolder and isfolder(cur)) then pcall(makefolder, cur) end
+	end
+end
+ensureFolder(CACHE); ensureFolder(STICKER_CACHE)
+
+local function cachedAsset(url, path)
+	if not (writefile and isfile and getcustomasset) then return nil end
+	if not isfile(path) then
+		local ok, data = pcall(function()
+			local r = REQUEST({ Url = url, Method = "GET" })
+			local c = r and tonumber(r.StatusCode or r.Status or 0) or 0
+			if c >= 200 and c < 300 then return r.Body or r.body end
+		end)
+		if ok and type(data) == "string" and #data > 0 then pcall(writefile, path, data) end
+	end
+	if isfile(path) then
+		local ok, asset = pcall(getcustomasset, path)
+		if ok then return asset end
+	end
+	return nil
+end
+
+-- limit simultaneous downloads (lag protection)
+local dlActive = 0
+local function limited(fn)
+	while alive and dlActive >= 3 do task.wait(0.05) end
+	dlActive += 1
+	local ok, res = pcall(fn)
+	dlActive -= 1
+	return ok and res or nil
+end
+
+local repoSet = {}
+for _, r in ipairs(STICKER_REPOS) do repoSet[r.repo] = true end
+local function isImageName(n)
+	n = n:lower()
+	return n:match("%.png$") or n:match("%.jpg$") or n:match("%.jpeg$") or n:match("%.webp$") or n:match("%.gif$")
+end
+-- a sticker reference is "Repo/file.png"; only our own repos are accepted
+local function validSticker(s)
+	if type(s) ~= "string" or #s > 100 then return nil end
+	local repo, name = s:match("^([^/]+)/([^/\\]+)$")
+	if repo and repoSet[repo] and isImageName(name) and not name:find("%c") then return s end
+	return nil
+end
+local function stickerAsset(ref)
+	local repo, name = ref:match("^([^/]+)/(.+)$")
+	if not repo then return nil end
+	local url = "https://raw.githubusercontent.com/" .. GITHUB_OWNER .. "/" .. repo .. "/main/" .. enc(name)
+	local path = STICKER_CACHE .. "/" .. safeName(repo) .. "_" .. safeName(name)
+	return limited(function() return cachedAsset(url, path) end)
+end
+
+local listingMem = {}
+local function getListing(repo)
+	if listingMem[repo] then return listingMem[repo] end
+	local lp = STICKER_CACHE .. "/" .. safeName(repo) .. "_list.json"
+	local disk
+	pcall(function()
+		if isfile and readfile and isfile(lp) then
+			local d = HttpService:JSONDecode(readfile(lp))
+			if type(d) == "table" and type(d.names) == "table" then disk = d end
+		end
+	end)
+	if disk and (os.time() - (disk.t or 0)) < CONFIG.STICKER_LIST_TTL then
+		listingMem[repo] = disk.names
+		return disk.names
+	end
+	local ok, data = requestJSON("GET", "https://api.github.com/repos/" .. GITHUB_OWNER .. "/" .. repo .. "/contents",
+		nil, { Accept = "application/vnd.github+json" })
+	if ok and type(data) == "table" then
+		local names = {}
+		for _, it in ipairs(data) do
+			if it.type == "file" and isImageName(it.name) then names[#names + 1] = it.name end
+		end
+		table.sort(names)
+		pcall(function() if writefile then writefile(lp, HttpService:JSONEncode({ t = os.time(), names = names })) end end)
+		listingMem[repo] = names
+		return names
+	end
+	if disk then listingMem[repo] = disk.names; return disk.names end -- offline: use stale list
+	return nil
+end
+
+----------------------------------------------------------------- security: bans + identity guard
+local KICK_SPOOF = "Saiki Chat does not Permit Spoofing"
+local KICK_BAN = "You are banned from Saiki Chat."
+local banned, bannedHwid = {}, {}
+for id, v in pairs(BANNED_USER_IDS) do banned[id] = v end
+
+local function kick(msg) pcall(function() LP:Kick(msg) end) end
+
+-- hashed hardware id, computed locally and only compared with the ban list (never sent anywhere)
+local function myHwidHash()
+	local fn = gethwid or getmacaddress or getdeviceid
+	if not fn then return nil end
+	local ok, raw = pcall(fn)
+	if not ok or type(raw) ~= "string" or raw == "" then return nil end
+	raw = raw:lower():gsub("%s+", "")
+	local hasher = crypt and crypt.hash
+	if hasher then
+		local ok2, res = pcall(hasher, raw, "sha256")
+		if ok2 and type(res) == "string" then return res:lower() end
+	end
+	return nil
+end
+local MY_HWID = myHwidHash()
+
+local function loadBanList()
+	if CONFIG.BAN_LIST_URL == "" then return end
+	local ok, data = requestJSON("GET", CONFIG.BAN_LIST_URL)
+	if ok and type(data) == "table" then
+		if type(data.ids) == "table" then
+			for _, id in ipairs(data.ids) do banned[tonumber(id) or id] = true end
+		end
+		if type(data.hwids) == "table" then
+			for _, h in ipairs(data.hwids) do bannedHwid[tostring(h):lower()] = true end
+		end
+	end
+end
+local function isBanned() return banned[LP.UserId] or (MY_HWID and bannedHwid[MY_HWID]) or false end
+
+-- baseline of the 4 credentials taken at launch
+local base = { name = LP.Name, id = LP.UserId, dn = LP.DisplayName, age = LP.AccountAge }
+
+-- check 1: did any of the 4 values change locally since launch?
+local function localDrift()
+	return LP.Name ~= base.name or LP.UserId ~= base.id or LP.DisplayName ~= base.dn or LP.AccountAge ~= base.age
+end
+
+-- extra anchors: Roblox's own player lookups don't use the properties a spoofer edits
+local function anchorsOk()
+	local ok1, p = pcall(function() return Players:GetPlayerByUserId(LP.UserId) end)
+	if not ok1 or p ~= LP then return false end
+	local ok2, q = pcall(function() return Players:FindFirstChild(LP.Name) end)
+	if ok2 and q ~= LP then return false end
+	return true
+end
+
+-- check 2: compare all 4 with Roblox's API. true = matches, false = mismatch, nil = couldn't check
+local function apiCheck(withDisplay)
+	local ok, d = requestJSON("GET", "https://users.roblox.com/v1/users/" .. tostring(LP.UserId))
+	if not ok or type(d) ~= "table" or not d.id then return nil end
+	if tonumber(d.id) ~= LP.UserId then return false end
+	if tostring(d.name):lower() ~= LP.Name:lower() then return false end
+	if withDisplay and tostring(d.displayName) ~= LP.DisplayName then return false end
+	local okT, dt = pcall(DateTime.fromIsoDate, tostring(d.created))
+	if okT and dt then
+		local days = math.floor((os.time() - dt.UnixTimestamp) / 86400)
+		if math.abs(days - LP.AccountAge) > CONFIG.AGE_TOLERANCE_DAYS then return false end
+	end
+	return true
+end
+
+-- returns "ok" | "spoof" (definite) | "mismatch" (API disagrees, needs 2 strikes) | "unknown"
+local function checkIdentity(withDisplay)
+	if localDrift() or not anchorsOk() then return "spoof" end
+	if not REQUEST then return "unknown" end
+	local r = apiCheck(withDisplay)
+	if r == nil then return "unknown" end
+	return r and "ok" or "mismatch"
+end
+
+-- startup gate: nothing is built if this fails
+loadBanList()
+if isBanned() then kick(KICK_BAN); do return end end
+do
+	local strikes, verdict = 0, "unknown"
+	for _ = 1, 4 do
+		verdict = checkIdentity(true) -- full 4-field API comparison at launch
+		if verdict == "spoof" then kick(KICK_SPOOF); do return end end
+		if verdict == "mismatch" then
+			strikes += 1
+			if strikes >= 2 then kick(KICK_SPOOF); do return end end
+		elseif verdict == "ok" then
+			break
+		end
+		task.wait(2)
+	end
+	if verdict ~= "ok" then
+		warn("[SAIKI RECHAT] Roblox API identity check unavailable; continuing without it.")
+		if CONFIG.REQUIRE_API then return end
+	end
+end
+
+----------------------------------------------------------------- gui root
+local function guiParent()
+	local ok, h = pcall(function() return gethui and gethui() end)
+	if ok and h then return h end
+	local ok2 = pcall(function() return game:GetService("CoreGui"):GetChildren() end)
+	if ok2 then return game:GetService("CoreGui") end
+	return LP:WaitForChild("PlayerGui")
+end
+local gui = new("ScreenGui", { Name = "SaikiRechat", ResetOnSpawn = false, DisplayOrder = 50,
+	IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, Parent = guiParent() })
+local blur
+if CONFIG.BLUR_BACKGROUND then
+	pcall(function() blur = new("BlurEffect", { Name = "SaikiBlur", Size = 0, Parent = Lighting }) end)
+end
+
+----------------------------------------------------------------- chat view (bubbles, stickers, grouping)
+local openMenu -- forward (defined near the sticker picker)
+local openProfile -- forward (profile card, defined after the message menu)
+local function ChatView(parent, onSend, cooldown, placeholder, onReact, canSend)
+	local self = { lastUid = nil, lastTs = 0, rows = {}, n = 0, items = {}, reacts = {}, mineLock = {}, replyTo = nil }
+	local root = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = parent })
+	local list = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 1, -58), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 3, ScrollBarImageColor3 = T.mut, ScrollBarImageTransparency = 0.5,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y, Parent = root,
+	}, {
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3) }),
+		new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14),
+			PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6) }),
+	})
+	local bar = new("Frame", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -10),
+		Size = UDim2.new(1, -28, 0, 40), BackgroundColor3 = WHITE, BackgroundTransparency = 0.92,
+		Parent = root }, { corner(20), stroke(0.88) })
+	local box = new("TextBox", { Position = UDim2.new(0, 16, 0, 0), Size = UDim2.new(1, -118, 1, 0),
+		BackgroundTransparency = 1, Text = "", PlaceholderText = placeholder or "Message",
+		PlaceholderColor3 = T.mut, TextColor3 = T.text, Font = T.font, TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Parent = bar })
+
+	-- sticker button (drawn icon)
+	local stkBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -66, 0.5, 0),
+		Size = UDim2.fromOffset(30, 30), BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = "",
+		AutoButtonColor = false, Parent = bar }, { corner(15) })
+	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(16, 16),
+		BackgroundTransparency = 1, Parent = stkBtn }, { corner(5), stroke(0.15, 1.5) })
+	for _, x in ipairs({ 11, 17 }) do
+		new("Frame", { Position = UDim2.fromOffset(x, 11), Size = UDim2.fromOffset(2, 2), BackgroundColor3 = WHITE,
+			Parent = stkBtn }, { corner(1) })
+	end
+	new("Frame", { Position = UDim2.fromOffset(11, 17), Size = UDim2.fromOffset(8, 2), BackgroundColor3 = WHITE,
+		Parent = stkBtn }, { corner(1) })
+
+	local sendBg = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -5, 0.5, 0),
+		Size = UDim2.fromOffset(54, 30), BackgroundColor3 = WHITE, Parent = bar }, { corner(15), grad(0) })
+	local btn = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "Send",
+		Font = T.fontB, TextSize = 13, TextColor3 = WHITE, AutoButtonColor = false, Parent = sendBg })
+
+	-- reply bar (shown above the input while replying)
+	local replyBar = new("Frame", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -54),
+		Size = UDim2.new(1, -28, 0, 34), BackgroundColor3 = WHITE, BackgroundTransparency = 0.92, Visible = false,
+		Parent = root }, { corner(12), stroke(0.9) })
+	new("Frame", { Position = UDim2.fromOffset(8, 6), Size = UDim2.new(0, 3, 1, -12), BackgroundColor3 = T.accB,
+		Parent = replyBar }, { corner(2) })
+	local replyTxt = new("TextLabel", { Position = UDim2.fromOffset(20, 0), Size = UDim2.new(1, -56, 1, 0),
+		BackgroundTransparency = 1, Text = "", Font = T.font, TextSize = 12, TextColor3 = T.mut,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = replyBar })
+	local replyX = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+		Size = UDim2.fromOffset(24, 24), BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 18,
+		TextColor3 = T.mut, AutoButtonColor = false, Parent = replyBar })
+	function self.clearReply()
+		self.replyTo = nil
+		replyBar.Visible = false
+		list.Size = UDim2.new(1, 0, 1, -58)
+	end
+	function self.setReply(item)
+		local prev = item.stk and "Sticker" or clean(item.text or "")
+		self.replyTo = { k = tostring(item.key), n = cut(item.name, 40), t = cut(prev, 60) }
+		replyTxt.Text = "Replying to " .. self.replyTo.n .. ": " .. cut(prev, 40)
+		replyBar.Visible = true
+		list.Size = UDim2.new(1, 0, 1, -96)
+		pcall(function() box:CaptureFocus() end)
+	end
+	replyX.Activated:Connect(function() self.clearReply() end)
+
+	local nextOk = 0
+	local function fire(p)
+		if os.clock() < nextOk then return false end
+		if canSend and not canSend() then return false end -- e.g. server chat needs 2+ players
+		if cooldown and cooldown > 0 then
+			nextOk = os.clock() + cooldown
+			task.spawn(function()
+				while alive and os.clock() < nextOk do
+					btn.Text = tostring(math.ceil(nextOk - os.clock())) .. "s"
+					task.wait(0.25)
+				end
+				btn.Text = "Send"
+			end)
+		end
+		if self.replyTo then p.reply = self.replyTo; self.clearReply() end
+		onSend(p)
+		return true
+	end
+	local function submit()
+		local txt = clean(box.Text)
+		if txt == "" then return end
+		if fire({ text = txt }) then box.Text = "" end
+	end
+	bind(btn.Activated, submit)
+	bind(box.FocusLost, function(enter) if enter then submit() end end)
+	function self.sendSticker(ref) return fire({ stk = ref }) end
+
+	-- ===== reactions =====
+	local function renderReactions(key)
+		local item = self.items[key]
+		if not item then return end
+		local map = self.reacts[key] or {}
+		local counts, order = {}, {}
+		for _, e in pairs(map) do
+			if not counts[e] then counts[e] = 0; order[#order + 1] = e end
+			counts[e] += 1
+		end
+		table.sort(order)
+		local mineE = map[ME]
+		local parts = {}
+		for _, e in ipairs(order) do parts[#parts + 1] = e .. counts[e] end
+		local sig = table.concat(parts, ",") .. "|" .. tostring(mineE)
+		if item.sig == sig then return end -- nothing changed, skip rebuild
+		item.sig = sig
+		if item.reactBox then item.reactBox:Destroy(); item.reactBox = nil end
+		if #order == 0 then return end
+		local holder = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+			LayoutOrder = 4, Parent = item.col }, {
+			new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4),
+				SortOrder = Enum.SortOrder.LayoutOrder,
+				HorizontalAlignment = item.mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left }),
+		})
+		for i, e in ipairs(order) do
+			local chip = new("TextButton", { Size = UDim2.fromOffset(0, 22), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = i,
+				BackgroundColor3 = (mineE == e) and T.accA or WHITE, BackgroundTransparency = (mineE == e) and 0.35 or 0.9,
+				Text = e .. " " .. counts[e], Font = T.fontB, TextSize = 12, TextColor3 = T.text, AutoButtonColor = false,
+				Parent = holder }, { corner(11), pad(0, 8) })
+			chip.Activated:Connect(function() self.react(key, e) end)
+		end
+		item.reactBox = holder
+	end
+	-- toggle my reaction on a message (one reaction per person, tap the same one again to remove)
+	function self.react(key, emoji)
+		local map = self.reacts[key] or {}
+		local newE = (map[ME] ~= emoji) and emoji or nil
+		map[ME] = newE
+		self.reacts[key] = map
+		self.mineLock[key] = os.clock() + 4 -- ignore stale poll data for my own reaction briefly
+		renderReactions(key)
+		if onReact then onReact(key, newE) end
+	end
+	function self.setReactions(key, map)
+		map = map or {}
+		if (self.mineLock[key] or 0) > os.clock() then map[ME] = (self.reacts[key] or {})[ME] end
+		self.reacts[key] = map
+		renderReactions(key)
+	end
+
+	-- ===== long-press (touch/mouse hold) or right-click opens the message menu =====
+	local function attachPress(obj, item)
+		obj.InputBegan:Connect(function(input)
+			local ut = input.UserInputType
+			if ut == Enum.UserInputType.MouseButton2 then openMenu(self, item, obj); return end
+			if ut ~= Enum.UserInputType.MouseButton1 and ut ~= Enum.UserInputType.Touch then return end
+			local start = input.Position
+			task.delay(0.45, function()
+				if not alive or not obj.Parent then return end
+				local st = input.UserInputState
+				if st == Enum.UserInputState.End or st == Enum.UserInputState.Cancel then return end
+				if (input.Position - start).Magnitude > 12 then return end -- finger moved = scrolling
+				openMenu(self, item, obj)
+			end)
+		end)
+	end
+
+	function self.add(m)
+		local mine = (tostring(m.uid) == ME)
+		local key = tostring(m.key or ("l" .. (self.n + 1)))
+		local newGroup = not (self.lastUid == m.uid and (os.clock() - self.lastTs) < CONFIG.GROUP_WINDOW)
+		self.lastUid, self.lastTs = m.uid, os.clock()
+		self.n += 1
+		local atBottom = list.CanvasPosition.Y >= list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y - 40
+		local w = list.AbsoluteSize.X
+		if w < 50 then w = 480 end
+		local maxW = math.max(140, math.floor(w * 0.62))
+
+		local row = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1, LayoutOrder = self.n, Parent = list }, {
+			new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder,
+				HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left,
+				Padding = UDim.new(0, 8) }),
+			new("UIPadding", { PaddingTop = UDim.new(0, newGroup and 8 or 0) }),
+		})
+		row:SetAttribute("k", key)
+		local avW = (mine and not CONFIG.SHOW_OWN_AVATAR) and 0 or 30
+		local av = new("Frame", { Size = UDim2.fromOffset(avW, 30), BackgroundTransparency = 1,
+			LayoutOrder = mine and 2 or 1, Parent = row })
+		if newGroup and avW > 0 then
+			local avBtn = new("ImageButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0.88,
+				Image = thumb(m.uid), AutoButtonColor = false, Parent = av }, { corner(15) })
+			avBtn.Activated:Connect(function()
+				if openProfile then openProfile(m.uid, m.name, m.user) end
+			end)
+		end
+		local col = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+			LayoutOrder = mine and 1 or 2, Parent = row }, {
+			new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2),
+				HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left }),
+		})
+		if newGroup and not mine then
+			new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+				Text = m.name, Font = T.fontB, TextSize = 12, TextColor3 = T.mut, LayoutOrder = 1, Parent = col },
+				{ new("UIPadding", { PaddingLeft = UDim.new(0, 4) }) })
+		end
+
+		-- quoted message (reply), drawn inside the bubble (text) or as a small pill above a sticker
+		local function makeQuote(par, order)
+			local q = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, LayoutOrder = order,
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = par },
+				{ corner(8), pad(4, 8), new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }) })
+			new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+				Text = m.reply.n, Font = T.fontB, TextSize = 11, TextColor3 = mine and WHITE or T.accB, LayoutOrder = 1, Parent = q })
+			new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+				Text = m.reply.t, TextWrapped = true, Font = T.font, TextSize = 12, TextColor3 = T.text,
+				TextTransparency = 0.25, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 2, Parent = q },
+				{ new("UISizeConstraint", { MaxSize = Vector2.new(math.max(100, maxW - 30), math.huge) }) })
+		end
+
+		local target
+		if m.stk then
+			if m.reply then makeQuote(col, 2) end
+			target = new("ImageLabel", { Size = UDim2.fromOffset(112, 112), BackgroundColor3 = WHITE,
+				BackgroundTransparency = 0.94, Image = "", ScaleType = Enum.ScaleType.Fit, LayoutOrder = 3, Parent = col },
+				{ corner(14) })
+			task.spawn(function()
+				local a = stickerAsset(m.stk)
+				if not (alive and target.Parent) then return end
+				if a then
+					target.Image = a
+					target.BackgroundTransparency = 1
+				else
+					new("TextLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "[sticker]",
+						Font = T.font, TextSize = 13, TextColor3 = T.mut, Parent = target })
+				end
+			end)
+		else
+			target = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, LayoutOrder = 3,
+				BackgroundColor3 = WHITE, BackgroundTransparency = mine and 0.05 or 0.9, Parent = col },
+				{ corner(16), pad(8, 12), new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
+					HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left }) })
+			if mine then new("UIGradient", { Color = ColorSequence.new(T.accA, T.accB), Rotation = 25, Parent = target })
+			else stroke(0.9).Parent = target end
+			if m.reply then makeQuote(target, 1) end
+			new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+				Text = m.text, TextWrapped = true, RichText = false, Font = T.font, TextSize = 15, TextColor3 = T.text,
+				TextXAlignment = mine and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left, LayoutOrder = 2, Parent = target },
+				{ new("UISizeConstraint", { MaxSize = Vector2.new(maxW, math.huge) }) })
+		end
+		local sc = new("UIScale", { Scale = 0.88, Parent = target })
+		tween(sc, 0.28, { Scale = 1 }, Enum.EasingStyle.Back)
+
+		local item = { key = key, mine = mine, uid = m.uid, name = m.name, text = m.text, stk = m.stk, col = col }
+		self.items[key] = item
+		attachPress(target, item)
+		if self.reacts[key] then renderReactions(key) end
+
+		self.rows[#self.rows + 1] = row
+		if #self.rows > CONFIG.MAX_MESSAGES then
+			local old = table.remove(self.rows, 1)
+			local k = old:GetAttribute("k")
+			if k then self.items[k] = nil; self.reacts[k] = nil; self.mineLock[k] = nil end
+			old:Destroy()
+		end
+		if atBottom or mine then
+			task.defer(function()
+				RunService.Heartbeat:Wait()
+				if alive then list.CanvasPosition = Vector2.new(0, math.max(0, list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y)) end
+			end)
+		end
+	end
+
+	function self.notice(text)
+		self.n += 1
+		self.lastUid = nil
+		self.rows[#self.rows + 1] = new("TextLabel", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+			Text = text, Font = T.font, TextSize = 12, TextColor3 = T.mut, LayoutOrder = self.n, Parent = list })
+	end
+	function self.clear()
+		for _, r in ipairs(self.rows) do r:Destroy() end
+		self.rows, self.lastUid, self.n = {}, nil, 0
+		self.items, self.reacts, self.mineLock = {}, {}, {}
+		self.clearReply()
+	end
+
+	self.root, self.box, self.stickerBtn = root, box, stkBtn
+	return self
+end
+
+----------------------------------------------------------------- window + tabs (2 tabs)
+local TABS = { "Saiki Server", "Saiki DMs", "Profile" }
+local NT = #TABS
+local unread = { false, false, false }
+local cur, isOpen = 1, false
+local closePicker, closeMenu, closeProfile, onShowTab -- forward
+
+local scrim = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "",
+	AutoButtonColor = false, Visible = false, Parent = gui })
+local win = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(475, 375), BackgroundColor3 = T.bg, BackgroundTransparency = T.bgT,
+	GroupTransparency = 1, Visible = false, Parent = gui }, {
+	corner(22), stroke(0.82, 1.2),
+})
+-- fixed 475x375; on screens too small for that it scales down uniformly instead of clipping
+local function fitScale()
+	local cam = workspace.CurrentCamera
+	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+	return math.clamp(math.min((vp.X - 24) / 475, (vp.Y - 24) / 375), 0.5, 1)
+end
+local winScale = new("UIScale", { Scale = 0.94 * fitScale(), Parent = win })
+new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = win },
+	{ new("UIGradient", { Rotation = 60, Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.93), NumberSequenceKeypoint.new(0.5, 0.98), NumberSequenceKeypoint.new(1, 1) }) }) })
+
+local tabBar = new("Frame", { Position = UDim2.new(0, 14, 0, 12), Size = UDim2.new(1, -28, 0, 36),
+	BackgroundColor3 = WHITE, BackgroundTransparency = 0.93, Parent = win }, { corner(18), stroke(0.9) })
+local ind = new("Frame", { Position = UDim2.new(0, 3, 0, 3), Size = UDim2.new(1 / NT, -6, 1, -6),
+	BackgroundColor3 = WHITE, Parent = tabBar }, { corner(15), grad(20) })
+local container = new("Frame", { Position = UDim2.fromOffset(0, 56), Size = UDim2.new(1, 0, 1, -56),
+	BackgroundTransparency = 1, Parent = win })
+
+local tabBtns, tabDots, pages = {}, {}, {}
+local btnDot
+local function updateDots()
+	local any = false
+	for i = 1, NT do
+		tabDots[i].Visible = unread[i]
+		any = any or unread[i]
+	end
+	if btnDot then btnDot.Visible = any end
+end
+local function markUnread(i, uid)
+	if tostring(uid) == ME then return end
+	if isOpen and cur == i then return end
+	unread[i] = true
+	updateDots()
+end
+
+local function showTab(i)
+	if i == cur then return end
+	if closePicker then closePicker() end
+	if closeMenu then closeMenu() end
+	if closeProfile then closeProfile() end
+	local dir = (i > cur) and 1 or -1
+	cur = i
+	for k, pg in ipairs(pages) do pg.Visible = (k == i) end
+	pages[i].Position = UDim2.fromOffset(26 * dir, 0)
+	tween(pages[i], 0.32, { Position = UDim2.new() })
+	tween(ind, 0.32, { Position = UDim2.new((i - 1) / NT, 3, 0, 3) })
+	for k, b in ipairs(tabBtns) do tween(b, 0.2, { TextColor3 = (k == i) and WHITE or T.mut }) end
+	unread[i] = false
+	updateDots()
+	if onShowTab then onShowTab(i) end
+end
+
+for i, nm in ipairs(TABS) do
+	local b = new("TextButton", { Size = UDim2.new(1 / NT, 0, 1, 0), Position = UDim2.new((i - 1) / NT, 0, 0, 0),
+		BackgroundTransparency = 1, Text = nm, Font = T.fontB, TextSize = 13, AutoButtonColor = false, ZIndex = 2,
+		TextColor3 = (i == 1) and WHITE or T.mut, Parent = tabBar })
+	tabDots[i] = new("Frame", { Size = UDim2.fromOffset(7, 7), AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 6), BackgroundColor3 = T.red, Visible = false, ZIndex = 3, Parent = b },
+		{ corner(4) })
+	tabBtns[i] = b
+	bind(b.Activated, function() showTab(i) end)
+end
+
+----------------------------------------------------------------- Roblox chat (optional) + own button
+local usingTCS = (TextChatService.ChatVersion == Enum.ChatVersion.TextChatService)
+local function setRbxChat(enabled)
+	pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, enabled) end)
+	if usingTCS then
+		pcall(function() TextChatService.ChatWindowConfiguration.Enabled = enabled end)
+		pcall(function() TextChatService.ChatInputBarConfiguration.Enabled = enabled end)
+	end
+end
+if CONFIG.HIDE_ROBLOX_CHAT then setRbxChat(false) end
+
+local function topbarHeight()
+	local ok, h = pcall(function() return GuiService.TopbarInset.Height end)
+	return (ok and type(h) == "number" and h > 0) and h or 58
+end
+-- sits directly BELOW Roblox's menu (settings) button, top-left
+local chatBtn = new("TextButton", { Name = "SaikiButton", Size = UDim2.fromOffset(38, 38),
+	Position = UDim2.fromOffset(CONFIG.BUTTON_X, topbarHeight() + CONFIG.BUTTON_GAP),
+	BackgroundColor3 = T.bg, BackgroundTransparency = 0.2, Text = "", AutoButtonColor = false, Parent = gui },
+	{ corner(19), stroke(0.78) })
+new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.45, 0), Size = UDim2.fromOffset(18, 13),
+	BackgroundColor3 = WHITE, Parent = chatBtn }, { corner(6) })
+new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, -5, 0.45, 8), Size = UDim2.fromOffset(6, 6),
+	Rotation = 45, BackgroundColor3 = WHITE, Parent = chatBtn })
+btnDot = new("Frame", { Size = UDim2.fromOffset(10, 10), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 1, 0, -1),
+	BackgroundColor3 = T.red, Visible = false, Parent = chatBtn }, { corner(5), stroke(0.2, 1.5) })
+pcall(function()
+	bind(GuiService:GetPropertyChangedSignal("TopbarInset"), function()
+		chatBtn.Position = UDim2.fromOffset(CONFIG.BUTTON_X, topbarHeight() + CONFIG.BUTTON_GAP)
+	end)
+end)
+
+local function setOpen(v)
+	isOpen = v
+	if v then
+		win.Visible, scrim.Visible = true, true
+		tween(win, 0.28, { GroupTransparency = 0 })
+		tween(winScale, 0.34, { Scale = fitScale() }, Enum.EasingStyle.Back)
+		if onShowTab then onShowTab(cur) end
+		if blur then tween(blur, 0.3, { Size = 14 }) end
+		unread[cur] = false
+		updateDots()
+	else
+		if closePicker then closePicker() end
+		if closeMenu then closeMenu() end
+		if closeProfile then closeProfile() end
+		scrim.Visible = false
+		tween(win, 0.2, { GroupTransparency = 1 })
+		tween(winScale, 0.2, { Scale = 0.94 * fitScale() })
+		if blur then tween(blur, 0.25, { Size = 0 }) end
+		task.delay(0.22, function() if alive and not isOpen then win.Visible = false end end)
+	end
+end
+bind(chatBtn.Activated, function() setOpen(not isOpen) end)
+bind(scrim.Activated, function() setOpen(false) end)
+
+local views = {}
+
+----------------------------------------------------------------- stream helper
+local function newStream(path, tAuth, base)
+	return { path = path, auth = tAuth, base = base, last = nil, seen = {}, primed = false }
+end
+local function pollStream(s, handler)
+	local extra = s.last and ('orderBy="$key"&startAt="' .. s.last .. '"')
+		or ('orderBy="$key"&limitToLast=' .. CONFIG.HISTORY)
+	local ok, data = dbRequest("GET", s.path, nil, s.auth, s.base, extra)
+	if not ok then return end
+	if type(data) == "table" then
+		local rows = {}
+		for k, v in pairs(data) do if type(v) == "table" then rows[#rows + 1] = { k = tostring(k), v = v } end end
+		table.sort(rows, function(a, b) return a.k < b.k end)
+		for _, it in ipairs(rows) do
+			if not s.last or it.k > s.last then s.last = it.k end
+			if not s.seen[it.k] then
+				s.seen[it.k] = true
+				handler(it.k, it.v, not s.primed)
+			end
+		end
+	end
+	s.primed = true
+end
+
+local function payload(p)
+	local d = { uid = ME, dn = LP.DisplayName, un = LP.Name, pfp = 1,
+		txt = p.stk and "[sticker]" or p.text, stk = p.stk, ts = SV }
+	if p.reply then d.rk, d.rn, d.rt = p.reply.k, p.reply.n, p.reply.t end
+	return d
+end
+local function parseReply(m)
+	if type(m.rk) == "string" and type(m.rn) == "string" and type(m.rt) == "string" and m.rk ~= "" then
+		return { k = cut(m.rk, 40), n = cut(clean(m.rn), 40), t = cut(clean(m.rt), 60) }
+	end
+	return nil
+end
+local function sendFail(view, raw, code, dbName)
+	warn("[SAIKI RECHAT] send failed on " .. tostring(dbName or "?") .. " (HTTP " .. tostring(code) .. "): " .. tostring(raw):sub(1, 300))
+	local why
+	if code == 401 or code == 403 then
+		local msg = tostring(raw):match('"error"%s*:%s*"([^"]+)"') or "denied"
+		why = tostring(dbName or "database") .. " refused the write (" .. code .. ": " .. msg .. "). Check its rules are published"
+	elseif code == 400 then why = "Firebase rejected the request (400)"
+	elseif not code then why = tostring(raw or "no response"):sub(1, 90)
+	else why = "HTTP " .. tostring(code) end
+	view.notice("Couldn't send: " .. why)
+end
+
+local function parseMsg(m)
+	local text = clean(m.txt or m.text or "")
+	local stk = validSticker(m.stk)
+	if stk then text = "" end
+	if text == "" and not stk then return nil end
+	return text, stk
+end
+
+----------------------------------------------------------------- tab 1: Saiki Server
+local serverStream = newStream("/servers/" .. enc(JOB) .. "/messages", auth, FIREBASE_DB)
+serverStream.rpath = "/servers/" .. enc(JOB) .. "/reactions"
+
+local function sendReaction(path, tAuth, base, key, emoji)
+	if not REQUEST then return end
+	task.spawn(function()
+		local p = path .. "/" .. enc(key) .. "/" .. ME
+		if emoji then dbRequest("PUT", p, '"' .. emoji .. '"', tAuth, base)
+		else dbRequest("DELETE", p, nil, tAuth, base) end
+	end)
+end
+
+-- Server chat is same-server only: players who are in THIS server (the database path is also per-JobId)
+local inServer = {}
+for _, pl in ipairs(Players:GetPlayers()) do inServer[pl.UserId] = true end
+bind(Players.PlayerAdded, function(pl) inServer[pl.UserId] = true end)
+local lastGate = 0
+local function serverCanSend()
+	if #Players:GetPlayers() >= 2 then return true end
+	if os.clock() - lastGate > 3 then
+		lastGate = os.clock()
+		views[1].notice("Server chat needs 2 or more players in this server.")
+	end
+	return false
+end
+
+views[1] = ChatView(container, function(p)
+	if not REQUEST then
+		views[1].add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply })
+		return
+	end
+	task.spawn(function()
+		local ok, res, raw, code = dbRequest("POST", serverStream.path, payload(p), auth, FIREBASE_DB)
+		if ok and type(res) == "table" and res.name then
+			if not serverStream.seen[res.name] then
+				serverStream.seen[res.name] = true
+				views[1].add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply, key = res.name })
+			end
+		else
+			sendFail(views[1], raw, code, "sxkicxat")
+		end
+	end)
+end, CONFIG.COOLDOWN_SERVER, "Message Saiki Server", function(key, e)
+	sendReaction(serverStream.rpath, auth, FIREBASE_DB, key, e)
+end, serverCanSend)
+pages[1] = views[1].root
+if not REQUEST then views[1].notice("No HTTP function found: running in local demo mode.") end
+
+local function serverHandler(key, m, silent)
+	local uid = tonumber(m.uid)
+	if not uid or banned[uid] then return end
+	local p = Players:GetPlayerByUserId(uid)
+	if not (p or inServer[uid]) then return end -- not someone who shares this server with me
+	local text, stk = parseMsg(m)
+	if not text then return end
+	local name = p and p.DisplayName or (type(m.dn) == "string" and m.dn:sub(1, 40)) or "Player"
+	local user = p and p.Name or (type(m.un) == "string" and m.un:match("^[%w_]+$") and m.un:sub(1, 40)) or nil
+	views[1].add({ uid = uid, name = name, user = user, text = text, stk = stk, key = key, reply = parseReply(m) })
+	if not silent then markUnread(1, uid) end
+end
+
+----------------------------------------------------------------- tab 2: Saiki DMs
+local DM_DIR = CACHE .. "/dm"
+ensureFolder(DM_DIR)
+local INDEX_FILE = CACHE .. "/dm_index_" .. ME .. ".json"
+local DIR_FILE = CACHE .. "/directory.json"
+local FRIENDS_FILE = CACHE .. "/friends_" .. ME .. ".json"
+
+local function readJson(path)
+	local ok, d = pcall(function()
+		if isfile and readfile and isfile(path) then return HttpService:JSONDecode(readfile(path)) end
+	end)
+	return ok and d or nil
+end
+local function writeJson(path, data)
+	pcall(function() if writefile then writefile(path, HttpService:JSONEncode(data)) end end)
+end
+local function pairKey(a, b) return math.min(tonumber(a), tonumber(b)) .. "_" .. math.max(tonumber(a), tonumber(b)) end
+local function ago(ms)
+	if not ms or ms <= 0 then return "" end
+	local d = os.time() - math.floor(ms / 1000)
+	if d < 60 then return "now" elseif d < 3600 then return math.floor(d / 60) .. "m"
+	elseif d < 86400 then return math.floor(d / 3600) .. "h" else return math.floor(d / 86400) .. "d" end
+end
+
+-- ===== local stores (loaded once; Firebase is only asked for what's NEW) =====
+-- index[partnerId] = { n=name, u=username, p=pairKey, l=lastKey, r=readKey, ts=lastMs, me=lastIsMine, x=preview, it=inboxTs }
+local index, legacyDone, indexDirty
+local directory, dirSync, dirDirty -- [id] = {d=display, n=username}
+local friends, friendsAt
+do
+	local f1, f2, f3 = readJson(INDEX_FILE) or {}, readJson(DIR_FILE) or {}, readJson(FRIENDS_FILE) or {}
+	index, legacyDone, indexDirty = f1.e or {}, f1.legacy == true, false
+	directory, dirSync, dirDirty = f2.u or {}, tonumber(f2.sync) or 0, false
+	friends, friendsAt = f3.f or {}, tonumber(f3.t) or 0
+end
+
+local function convPath(pid) return DM_DIR .. "/" .. pairKey(ME, pid) .. ".json" end
+local function loadConv(pid)
+	local d = readJson(convPath(pid))
+	return (type(d) == "table" and type(d.m) == "table") and d.m or {}
+end
+local function saveConv(pid, msgs)
+	while #msgs > CONFIG.DM_KEEP do table.remove(msgs, 1) end
+	writeJson(convPath(pid), { m = msgs })
+end
+local function toStored(key, m)
+	local text, stk = parseMsg(m)
+	if not text then return nil end
+	local rep = parseReply(m)
+	return { k = key, u = tostring(m.uid), t = text, s = stk, ts = tonumber(m.ts) or 0,
+		rk = rep and rep.k, rn = rep and rep.n, rt = rep and rep.t }
+end
+local function touchIndex(pid, st, name, user)
+	local e = index[pid] or { p = pairKey(ME, pid) }
+	index[pid] = e
+	if name and name ~= "" then e.n = name end
+	if user and user ~= "" then e.u = user end
+	if st and (not e.l or st.k > e.l) then
+		e.l, e.ts, e.me = st.k, st.ts, (st.u == ME)
+		e.x = st.s and "Sticker" or cut(st.t, 40)
+	end
+	indexDirty = true
+	return e
+end
+local function isUnread(pid)
+	local e = index[pid]
+	return (e and e.l and not e.me and e.l > (e.r or "")) and true or false
+end
+local function resolveName(pid)
+	local e = index[pid]
+	if not e or (e.n and e.n ~= "") then return end
+	local pl = Players:GetPlayerByUserId(tonumber(pid))
+	if pl then e.n, e.u = pl.DisplayName, pl.Name
+	elseif directory[pid] then e.n, e.u = directory[pid].d, directory[pid].n
+	else
+		local ok, nm = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(pid)) end)
+		if ok and nm then e.n, e.u = nm, nm end
+	end
+	indexDirty = true
+end
+
+local dm = { partner = nil, name = "" }
+local FS = {} -- follower system (filled in below)
+local dmStream, activeConv, activeDirty = nil, nil, false
+local home, refreshHome, openThread -- forward
+
+local function refreshUnread()
+	local any = false
+	for pid in pairs(index) do
+		if isUnread(pid) then any = true; break end
+	end
+	unread[2] = any
+	updateDots()
+	if home and home.Visible and isOpen and cur == 2 then refreshHome() end
+end
+
+-- ===== UI: home (Recent / In Server / Search) + thread =====
+local dmPage = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
+pages[2] = dmPage
+
+home = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = dmPage })
+local function newScroll(parent)
+	return new("ScrollingFrame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 3, ScrollBarImageColor3 = T.mut, CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = parent }, {
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6) }),
+		new("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14), PaddingTop = UDim.new(0, 4),
+			PaddingBottom = UDim.new(0, 10) }),
+	})
+end
+local function clearList(sf)
+	for _, c in ipairs(sf:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+end
+local function addHeader(sf, text, order, right)
+	local h = new("TextLabel", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = string.upper(text), Font = T.fontB,
+		TextSize = 11, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order, Parent = sf })
+	if right then
+		new("TextLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = right, Font = T.font, TextSize = 11,
+			TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Right, Parent = h })
+	end
+end
+local function addEmpty(sf, text, order, h)
+	new("TextLabel", { Size = UDim2.new(1, 0, 0, h or 60), BackgroundTransparency = 1, Text = text, TextWrapped = true,
+		Font = T.font, TextSize = 13, TextColor3 = T.mut, LayoutOrder = order or 1000, Parent = sf })
+end
+-- one reusable row look for every list
+local function makeRow(sf, e, order)
+	local r = new("TextButton", { Size = UDim2.new(1, 0, 0, 52), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94,
+		Text = "", AutoButtonColor = false, LayoutOrder = order, Parent = sf }, { corner(14), stroke(0.92) })
+	new("ImageLabel", { Position = UDim2.fromOffset(10, 9), Size = UDim2.fromOffset(34, 34), BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.88, Image = thumb(e.id), Parent = r }, { corner(17) })
+	new("TextLabel", { Position = UDim2.fromOffset(54, 7), Size = UDim2.new(1, -112, 0, 20), BackgroundTransparency = 1,
+		Text = e.name, Font = T.fontB, TextSize = 14, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+	new("TextLabel", { Position = UDim2.fromOffset(54, 27), Size = UDim2.new(1, -112, 0, 16), BackgroundTransparency = 1,
+		Text = e.sub or "", Font = T.font, TextSize = 12, TextColor3 = e.unread and T.accB or T.mut,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+	if e.ts then
+		new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 9), Size = UDim2.fromOffset(40, 16),
+			BackgroundTransparency = 1, Text = ago(e.ts), Font = T.font, TextSize = 11, TextColor3 = T.mut,
+			TextXAlignment = Enum.TextXAlignment.Right, Parent = r })
+	end
+	if e.unread then
+		new("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -14, 1, -10), Size = UDim2.fromOffset(10, 10),
+			BackgroundColor3 = T.red, Parent = r }, { corner(5) })
+	end
+	if e.unread then r.BackgroundTransparency = 0.88 end
+	r.Activated:Connect(function() openThread(e.id, e.name, e.user) end)
+end
+
+-- ONE scrolling feed holds everything: In this server strip, Recent chats, or live search results
+local feed = newScroll(home)
+feed.Position, feed.Size = UDim2.fromOffset(0, 44), UDim2.new(1, 0, 1, -44)
+local searchQ, lastCands, lastPending = "", nil, false
+
+-- ===== directory (Saiki users), friends, Roblox search =====
+local function syncDirectory()
+	local extra = dirSync > 0 and ('orderBy="upd"&startAt=' .. tostring(dirSync + 1)) or nil
+	local ok, data, _, code = dbRequest("GET", "/profiles", nil, auth, FIREBASE_DB, extra)
+	if not ok and code == 400 and extra then ok, data = dbRequest("GET", "/profiles", nil, auth, FIREBASE_DB) end
+	if not ok or type(data) ~= "table" then return end
+	local maxUpd = dirSync
+	for id, p in pairs(data) do
+		if type(p) == "table" and tostring(id):match("^%d+$") then
+			directory[tostring(id)] = { d = cut(tostring(p.dn or ""), 40), n = cut(tostring(p.un or ""), 40) }
+			maxUpd = math.max(maxUpd, tonumber(p.upd) or 0)
+		end
+	end
+	dirSync, dirDirty = maxUpd, true
+end
+local function writeMyProfile()
+	dbRequest("PATCH", "/profiles/" .. ME, { dn = LP.DisplayName, un = LP.Name, pfp = 1, age = LP.AccountAge, upd = SV },
+		auth, FIREBASE_DB)
+end
+local function loadFriends()
+	if os.time() - friendsAt < 21600 and next(friends) then return end
+	local ok, pages2 = pcall(function() return Players:GetFriendsAsync(LP.UserId) end)
+	if not ok or not pages2 then return end
+	local out, count = {}, 0
+	repeat
+		local okp, page = pcall(function() return pages2:GetCurrentPage() end)
+		if not okp then break end
+		for _, f in ipairs(page) do
+			out[tostring(f.Id)] = { d = f.DisplayName or f.Username, n = f.Username }
+			count += 1
+		end
+		if pages2.IsFinished or count >= 400 then break end
+		if not pcall(function() pages2:AdvanceToNextPageAsync() end) then break end
+	until false
+	if next(out) then
+		friends, friendsAt = out, os.time()
+		writeJson(FRIENDS_FILE, { t = friendsAt, f = friends })
+	end
+end
+local buildHome -- forward
+local UI = {}
+do -- search logic (private locals)
+local searchBar = new("Frame", { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -28, 0, 36), BackgroundColor3 = WHITE,
+	BackgroundTransparency = 0.92, Parent = home }, { corner(18), stroke(0.88) })
+-- little magnifier drawn from two frames (no font/emoji dependency)
+new("Frame", { Position = UDim2.fromOffset(15, 10), Size = UDim2.fromOffset(12, 12), BackgroundTransparency = 1, Parent = searchBar },
+	{ corner(6), stroke(0.35, 1.6) })
+new("Frame", { Position = UDim2.fromOffset(25, 24), Size = UDim2.fromOffset(7, 2), BackgroundColor3 = WHITE, BackgroundTransparency = 0.35,
+	Rotation = 45, BorderSizePixel = 0, Parent = searchBar })
+local searchBox = new("TextBox", { Position = UDim2.fromOffset(40, 0), Size = UDim2.new(1, -78, 1, 0), BackgroundTransparency = 1,
+	Text = "", PlaceholderText = "Search any player (name or username)", PlaceholderColor3 = T.mut, TextColor3 = T.text,
+	Font = T.font, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, Parent = searchBar })
+local clearBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), Size = UDim2.fromOffset(24, 24),
+	BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Text = "×", Font = T.fontB, TextSize = 16, TextColor3 = T.text,
+	AutoButtonColor = false, Visible = false, Parent = searchBar }, { corner(12) })
+bind(clearBtn.Activated, function() searchBox.Text = "" end)
+
+local function robloxSearch(q)
+	local ok, data = requestJSON("GET", "https://users.roblox.com/v1/users/search?keyword=" .. enc(q) .. "&limit=10")
+	local out = {}
+	if ok and type(data) == "table" and type(data.data) == "table" then
+		for _, u in ipairs(data.data) do
+			if u.id then out[#out + 1] = { id = tostring(u.id), d = tostring(u.displayName or u.name), n = tostring(u.name) } end
+		end
+	end
+	return out
+end
+
+-- "ares" matches dsadaares432 / we2dwdAReS: plain substring, case-insensitive, display name OR username
+local function matchScore(q, d, n)
+	q = q:lower()
+	local best
+	for _, str in ipairs({ d or "", n or "" }) do
+		local low = str:lower()
+		if low ~= "" then
+			local a = low:find(q, 1, true)
+			if a then
+				local sc = (low == q) and 3 or ((a == 1) and 2 or 1)
+				if not best or sc > best then best = sc end
+			end
+		end
+	end
+	return best
+end
+local function consider(cands, id, d, n, tier, tag, q)
+	if id == ME then return end
+	local sc = matchScore(q, d, n)
+	if not sc then return end
+	local c = cands[id]
+	if not c then
+		c = { id = id, name = (d and d ~= "") and d or n or ("User " .. id), user = n, tier = tier, sc = sc, tags = {} }
+		cands[id] = c
+	else
+		if tier < c.tier then c.tier = tier end
+		if sc > c.sc then c.sc = sc end
+		if (not c.user or c.user == "") and n then c.user = n end
+	end
+	c.tags[tag] = true
+end
+-- priority: 1 = history with me, 2 = friends, 3 = Saiki users / this server, 4 = rest of Roblox
+local function searchLocal(q)
+	local cands = {}
+	for pid, e in pairs(index) do if e.l then consider(cands, pid, e.n, e.u, 1, "Recent", q) end end
+	for id, f in pairs(friends) do consider(cands, id, f.d, f.n, 2, "Friend", q) end
+	for _, p in ipairs(Players:GetPlayers()) do consider(cands, tostring(p.UserId), p.DisplayName, p.Name, 3, "In server", q) end
+	for id, u in pairs(directory) do consider(cands, id, u.d, u.n, 3, "On Saiki", q) end
+	return cands
+end
+local function renderResults(cands, pending)
+	clearList(feed)
+	local arr = {}
+	for _, c in pairs(cands) do arr[#arr + 1] = c end
+	table.sort(arr, function(a, b)
+		if a.tier ~= b.tier then return a.tier < b.tier end
+		if a.sc ~= b.sc then return a.sc > b.sc end
+		return a.name:lower() < b.name:lower()
+	end)
+	local heads = { "From your history", "Friends", "Saiki users & this server", "Roblox results" }
+	local lastTier, order = 0, 0
+	for i, c in ipairs(arr) do
+		if i > 40 then break end
+		if c.tier ~= lastTier then lastTier = c.tier; order += 1; addHeader(feed, heads[c.tier], order) end
+		order += 1
+		local tags = {}
+		for _, t in ipairs({ "Recent", "Friend", "In server", "On Saiki", "Roblox" }) do if c.tags[t] then tags[#tags + 1] = t end end
+		local who = (c.user and c.user ~= "") and ("@" .. c.user .. "  •  ") or ""
+		makeRow(feed, { id = c.id, name = c.name, user = c.user, sub = who .. table.concat(tags, " • "),
+			unread = isUnread(c.id) }, order)
+	end
+	if #arr == 0 and not pending then addEmpty(feed, "No matches.", 1) end
+	if pending then addEmpty(feed, "Searching Roblox…", 999) end
+end
+local searchTok, lastApi = 0, 0
+local function runSearch()
+	searchTok += 1
+	local tok = searchTok
+	local q = searchBox.Text:match("^%s*(.-)%s*$") or ""
+	searchQ = q
+	clearBtn.Visible = searchBox.Text ~= ""
+	if q == "" then lastCands, lastPending = nil, false; buildHome(); return end
+	task.delay(0.2, function() -- debounce typing
+		if tok ~= searchTok or not alive then return end
+		local cands = searchLocal(q)
+		local wantApi = #q >= 3 and REQUEST ~= nil
+		lastCands, lastPending = cands, wantApi
+		feed.CanvasPosition = Vector2.new(0, 0)
+		renderResults(cands, wantApi)
+		if not wantApi then return end
+		task.delay(0.5, function()
+			if tok ~= searchTok or not alive then return end
+			local w = 1.3 - (os.clock() - lastApi) -- stay under Roblox's rate limit
+			if w > 0 then task.wait(w) end
+			if tok ~= searchTok or not alive then return end
+			lastApi = os.clock()
+			for _, r in ipairs(robloxSearch(q)) do consider(cands, r.id, r.d, r.n, 4, "Roblox", q) end
+			if tok ~= searchTok or not alive then return end
+			lastPending = false
+			renderResults(cands, false)
+		end)
+	end)
+end
+bind(searchBox:GetPropertyChangedSignal("Text"), runSearch)
+UI.renderResults = renderResults
+end -- search logic
+
+-- ===== home feed: "In this server" strip + "Recent" chats (one page) =====
+do -- home feed (private helpers)
+local GREEN = Color3.fromRGB(80, 220, 140)
+local function addStrip(sf, arr, order)
+	local strip = new("ScrollingFrame", { Size = UDim2.new(1, 0, 0, 84), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 0, ScrollingDirection = Enum.ScrollingDirection.X, CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.X, LayoutOrder = order, Parent = sf },
+		{ new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8) }) })
+	for i, e in ipairs(arr) do
+		local c = new("TextButton", { Size = UDim2.fromOffset(70, 80), BackgroundColor3 = WHITE, BackgroundTransparency = e.unread and 0.88 or 0.94,
+			Text = "", AutoButtonColor = false, LayoutOrder = i, Parent = strip }, { corner(14), stroke(0.92) })
+		new("ImageLabel", { Position = UDim2.fromOffset(15, 8), Size = UDim2.fromOffset(40, 40), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Image = thumb(e.id), Parent = c }, { corner(20) })
+		if e.saiki then
+			new("Frame", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromOffset(57, 50), Size = UDim2.fromOffset(11, 11),
+				BackgroundColor3 = GREEN, Parent = c }, { corner(6), new("UIStroke", { Color = T.bg, Thickness = 2 }) })
+		end
+		if e.unread then
+			new("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -6, 0, 6), Size = UDim2.fromOffset(9, 9),
+				BackgroundColor3 = T.red, Parent = c }, { corner(5) })
+		end
+		new("TextLabel", { Position = UDim2.fromOffset(4, 54), Size = UDim2.new(1, -8, 0, 18), BackgroundTransparency = 1, Text = e.name,
+			Font = T.fontB, TextSize = 11, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, Parent = c })
+		c.Activated:Connect(function() openThread(e.id, e.name, e.user) end)
+	end
+end
+
+function buildHome()
+	local keep = feed.CanvasPosition
+	clearList(feed)
+	-- players in this server (history / friends / Saiki users first)
+	local arr = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LP then
+			local id = tostring(p.UserId)
+			arr[#arr + 1] = { id = id, name = p.DisplayName, user = p.Name, unread = isUnread(id), saiki = directory[id] ~= nil,
+				rank = (index[id] and 4 or 0) + (friends[id] and 2 or 0) + (directory[id] and 1 or 0) }
+		end
+	end
+	table.sort(arr, function(a, b)
+		if a.rank ~= b.rank then return a.rank > b.rank end
+		return a.name:lower() < b.name:lower()
+	end)
+	addHeader(feed, "In this server", 1, (#arr > 0) and (#arr .. " here  •  ● on Saiki") or nil)
+	if #arr == 0 then addEmpty(feed, "No other players in this server.", 2, 34) else addStrip(feed, arr, 2) end
+	-- recent conversations
+	local rec = {}
+	for pid, e in pairs(index) do if e.l then rec[#rec + 1] = { id = pid, e = e } end end
+	table.sort(rec, function(a, b) return (a.e.ts or 0) > (b.e.ts or 0) end)
+	addHeader(feed, "Recent", 3, (#rec > 0) and tostring(#rec) or nil)
+	if #rec == 0 then
+		addEmpty(feed, "No conversations yet.\nTap a player above or use search to start one.", 4, 64)
+	else
+		for i, it in ipairs(rec) do
+			if i > 60 then break end
+			local e = it.e
+			makeRow(feed, { id = it.id, name = e.n or ("User " .. it.id), user = e.u, ts = e.ts,
+				sub = (e.me and "You: " or "") .. (e.x or ""), unread = isUnread(it.id) }, 10 + i)
+		end
+	end
+	feed.CanvasPosition = keep
+end
+
+function refreshHome()
+	if searchQ ~= "" then
+		if lastCands then UI.renderResults(lastCands, lastPending) end
+	else
+		buildHome()
+	end
+end
+onShowTab = function(i) if i == 2 and home.Visible then refreshHome() end end
+local function homeLive() return alive and isOpen and cur == 2 and home.Visible end
+bind(Players.PlayerAdded, function() if homeLive() and searchQ == "" then refreshHome() end end)
+bind(Players.PlayerRemoving, function() task.delay(0.2, function() if homeLive() and searchQ == "" then refreshHome() end end) end)
+end -- home feed
+
+-- ===== thread (chat view) =====
+local thread = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = dmPage })
+local backBtn = new("TextButton", { Position = UDim2.fromOffset(14, 2), Size = UDim2.fromOffset(34, 32),
+	BackgroundColor3 = WHITE, BackgroundTransparency = 0.92, Text = "‹", Font = T.fontB, TextSize = 22,
+	TextColor3 = T.text, AutoButtonColor = false, Parent = thread }, { corner(12) })
+local dmAv = new("ImageLabel", { Position = UDim2.fromOffset(56, 3), Size = UDim2.fromOffset(30, 30),
+	BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = thread }, { corner(15) })
+local dmTitle = new("TextLabel", { Position = UDim2.fromOffset(94, 1), Size = UDim2.new(1, -206, 0, 19),
+	BackgroundTransparency = 1, Text = "", Font = T.fontB, TextSize = 15, TextColor3 = T.text,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = thread })
+local dmSub = new("TextLabel", { Position = UDim2.fromOffset(94, 19), Size = UDim2.new(1, -206, 0, 14),
+	BackgroundTransparency = 1, Text = "", Font = T.font, TextSize = 11, TextColor3 = T.mut,
+	TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = thread })
+local followBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 4), Size = UDim2.fromOffset(92, 26),
+	BackgroundColor3 = WHITE, Text = "Follow", Font = T.fontB, TextSize = 12, TextColor3 = WHITE, AutoButtonColor = false,
+	Visible = false, Parent = thread }, { corner(13), grad(20) })
+
+local function renderStored(st)
+	views.dm.add({ uid = st.u, name = (st.u == ME) and LP.DisplayName or dm.name, text = st.t, stk = st.s, key = st.k,
+		user = (st.u == ME) and LP.Name or (index[dm.partner] and index[dm.partner].u) or nil,
+		reply = st.rk and { k = st.rk, n = st.rn or "", t = st.rt or "" } or nil })
+end
+
+local lastFlush, lastIdxSave = 0, 0
+local function flushAll(force)
+	if activeConv and activeDirty and dm.partner and (force or os.clock() - lastFlush > 4) then
+		saveConv(dm.partner, activeConv); activeDirty = false; lastFlush = os.clock()
+	end
+	if indexDirty and (force or os.clock() - lastIdxSave > 6) then
+		writeJson(INDEX_FILE, { legacy = legacyDone, e = index }); indexDirty = false; lastIdxSave = os.clock()
+	end
+	if dirDirty and (force or true) then
+		writeJson(DIR_FILE, { sync = dirSync, u = directory }); dirDirty = false
+	end
+end
+
+views.dm = ChatView(thread, function(p)
+	if not dm.partner then return end
+	if not REQUEST then
+		views.dm.add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply })
+		return
+	end
+	local s, partner = dmStream, dm.partner
+	task.spawn(function()
+		local ok, res, raw, code = dbRequest("POST", s.path, payload(p), dmAuth, DM_FIREBASE_DB)
+		if ok and type(res) == "table" and res.name then
+			if s == dmStream and not s.seen[res.name] then
+				s.seen[res.name] = true
+				local st = { k = res.name, u = ME, t = p.text or "", s = p.stk, ts = os.time() * 1000,
+					rk = p.reply and p.reply.k, rn = p.reply and p.reply.n, rt = p.reply and p.reply.t }
+				if activeConv then activeConv[#activeConv + 1] = st; activeDirty = true end
+				touchIndex(partner, st, dm.name).r = st.k
+				renderStored(st)
+			end
+			-- tiny "inbox" ping so the other person only needs ONE cheap request to learn about new DMs
+			dbRequest("PUT", "/dminbox/" .. partner .. "/" .. ME, { ts = SV, k = res.name }, dmAuth, DM_FIREBASE_DB)
+		else
+			sendFail(views.dm, raw, code, "sxkidirect")
+		end
+	end)
+end, CONFIG.COOLDOWN_DM, "Message", function(key, e)
+	if dmStream and dmStream.rpath then sendReaction(dmStream.rpath, dmAuth, DM_FIREBASE_DB, key, e) end
+end)
+views.dm.root.Position = UDim2.fromOffset(0, 38)
+views.dm.root.Size = UDim2.new(1, 0, 1, -38)
+
+local function dmHandler(key, m)
+	local uid = tostring(m.uid or "")
+	if uid ~= ME and uid ~= dm.partner then return end
+	if banned[tonumber(uid)] then return end
+	local st = toStored(key, m)
+	if not st then return end
+	if activeConv then activeConv[#activeConv + 1] = st; activeDirty = true end
+	local e = touchIndex(dm.partner, st, dm.name)
+	if isOpen and cur == 2 and thread.Visible then e.r = st.k end -- I'm looking at it: counts as read
+	renderStored(st)
+end
+
+function openThread(id, name, user)
+	if closePicker then closePicker() end
+	dm.partner, dm.name = id, name
+	local pair = pairKey(ME, id)
+	activeConv, activeDirty = loadConv(id), false
+	dmStream = newStream("/dm/" .. pair, dmAuth, DM_FIREBASE_DB)
+	dmStream.rpath = "/dmreact/" .. pair
+	views.dm.clear()
+	-- 1) draw what's already on this device (no network)
+	for _, st in ipairs(activeConv) do dmStream.seen[st.k] = true end -- so Firebase's copy is never drawn twice
+	if #activeConv > 0 then dmStream.last = activeConv[#activeConv].k; dmStream.primed = true end
+	for i = math.max(1, #activeConv - CONFIG.DM_SHOW + 1), #activeConv do renderStored(activeConv[i]) end
+	dmTitle.Text, dmAv.Image = name, thumb(id)
+	if FS.onThread then FS.onThread(id, name, user) end
+	home.Visible, thread.Visible = false, true
+	if not REQUEST then views.dm.notice("Local demo mode: messages stay on your device.") end
+	local e = touchIndex(id, nil, name, user)
+	if e.l then e.r = e.l end
+	refreshUnread()
+	-- 2) ask Firebase only for what's newer than the last local message
+	task.spawn(function() pollStream(dmStream, dmHandler) end)
+end
+bind(backBtn.Activated, function()
+	if closePicker then closePicker() end
+	if closeMenu then closeMenu() end
+	flushAll(true)
+	dm.partner, dmStream, activeConv = nil, nil, nil
+	thread.Visible, home.Visible = false, true
+	refreshUnread()
+	refreshHome()
+end)
+
+-- ===== background sync (all cheap) =====
+-- fetch only the new messages of one conversation, straight into its local file
+local function fetchNew(pid, inboxTs)
+	if dm.partner == pid and dmStream then -- open thread keeps its own cursor and dedupe
+		pollStream(dmStream, dmHandler)
+		local ee = index[pid]
+		if ee then ee.it = inboxTs end
+		return
+	end
+	local msgs = loadConv(pid)
+	local lastKey = msgs[#msgs] and msgs[#msgs].k
+	local extra = lastKey and ('orderBy="$key"&startAt="' .. lastKey .. '"') or ('orderBy="$key"&limitToLast=' .. CONFIG.HISTORY)
+	local ok, data = dbRequest("GET", "/dm/" .. pairKey(ME, pid), nil, dmAuth, DM_FIREBASE_DB, extra)
+	if not ok or type(data) ~= "table" then return end
+	local rows = {}
+	for k, v in pairs(data) do if type(v) == "table" then rows[#rows + 1] = { k = tostring(k), v = v } end end
+	table.sort(rows, function(a, b) return a.k < b.k end)
+	local have, added = {}, false
+	for _, st in ipairs(msgs) do have[st.k] = true end
+	for _, it in ipairs(rows) do
+		local uid = tostring(it.v.uid or "")
+		if not have[it.k] and (uid == ME or uid == pid) and not banned[tonumber(uid)] then
+			local st = toStored(it.k, it.v)
+			if st then msgs[#msgs + 1] = st; added = true; touchIndex(pid, st) end
+		end
+	end
+	local e = index[pid] or touchIndex(pid, nil)
+	e.it = inboxTs
+	if added then saveConv(pid, msgs) end
+	resolveName(pid)
+	indexDirty = true
+end
+
+local function pollInbox()
+	local ok, data = dbRequest("GET", "/dminbox/" .. ME, nil, dmAuth, DM_FIREBASE_DB)
+	if not ok or type(data) ~= "table" then return end
+	local work = 0
+	for pid, v in pairs(data) do
+		if type(v) == "table" and tostring(pid):match("^%d+$") then
+			local ts = tonumber(v.ts) or 0
+			local e = index[tostring(pid)]
+			if (not e or ts > (e.it or 0)) and work < 5 then
+				work += 1
+				fetchNew(tostring(pid), ts)
+			end
+		end
+	end
+	refreshUnread()
+end
+
+-- once per install: find DM threads that already exist (older script versions had no inbox pings)
+local function discoverLegacy()
+	local ok, data = dbRequest("GET", "/dm", nil, dmAuth, DM_FIREBASE_DB, "shallow=true")
+	if not ok or type(data) ~= "table" then return end
+	local count = 0
+	for key in pairs(data) do
+		local a, b = tostring(key):match("^(%d+)_(%d+)$")
+		local pid = a and ((a == ME and b) or (b == ME and a))
+		if pid and not index[pid] and count < 25 then
+			count += 1
+			local ok2, msgs = dbRequest("GET", "/dm/" .. enc(key), nil, dmAuth, DM_FIREBASE_DB, 'orderBy="$key"&limitToLast=1')
+			if ok2 and type(msgs) == "table" then
+				for k, v in pairs(msgs) do
+					local st = type(v) == "table" and toStored(tostring(k), v)
+					if st then
+						local e = touchIndex(pid, st)
+						e.r = e.l -- old history starts as "read"
+						resolveName(pid)
+					end
+				end
+			end
+		end
+	end
+	legacyDone, indexDirty = true, true
+	refreshUnread()
+end
+
+refreshHome()
+refreshUnread()
+
+----------------------------------------------------------------- follower system (Firebase project sxikiflowsys)
+do
+	local ROMAN = { "I", "II", "III", "IV", "V" }
+	local TCOL = { Color3.fromRGB(120, 132, 165), Color3.fromRGB(80, 205, 140), Color3.fromRGB(64, 165, 255),
+		Color3.fromRGB(160, 105, 255), Color3.fromRGB(255, 192, 64) }
+	local function tierOf(n)
+		local t = 1
+		for i, th in ipairs(CONFIG.TIER_AT) do if n >= th then t = i end end
+		return t
+	end
+	FS.tierOf = tierOf
+	FS.ROMAN, FS.TCOL = ROMAN, TCOL
+	FS.following, FS.followers, FS.cache = {}, {}, {} -- following[targetId]={n,u}; followers=list; cache[id]={c,t}
+	FS.stamp, FS.loadedF, FS.loading, FS.ok, FS.locked = -1e9, false, false, false, false
+	local function fsReq(method, path, body, extra) return dbRequest(method, path, body, fsAuth, FS_FIREBASE_DB, extra) end
+	local function myUid()
+		if ensureToken(fsAuth) then return fsAuth.uid end
+		return nil
+	end
+	local function idStr(n) return string.format("%.0f", tonumber(n) or 0) end
+
+	-- followers of `id` = number of keys under /followers/<id> (shallow = keys only, tiny download)
+	function FS.count(id, force)
+		local c = FS.cache[id]
+		if c and not force and os.clock() - c.t < 60 then return c.c end
+		local ok, data = fsReq("GET", "/followers/" .. id, nil, "shallow=true")
+		if not ok then return c and c.c or nil end
+		local n = 0
+		if type(data) == "table" then for _ in pairs(data) do n = n + 1 end end
+		FS.cache[id] = { c = n, t = os.clock() }
+		return n
+	end
+
+	function FS.writeProfile()
+		local uid = myUid()
+		if not uid then return end
+		local ok, _, _, code = fsReq("PUT", "/profiles/" .. ME, { robloxUserId = LP.UserId, username = cut(LP.Name, 40),
+			displayName = cut(LP.DisplayName, 80), firebaseUid = uid, updatedAt = SV })
+		FS.locked = (not ok) and (code == 401 or code == 403)
+	end
+
+	function FS.follow(id, name, user)
+		local uid = myUid()
+		if not uid then return false, "follower system offline (" .. tostring(fsAuth.err) .. ")" end
+		local ok, _, _, code = fsReq("PUT", "/follows/" .. uid .. "/" .. id, { targetRobloxUserId = tonumber(id),
+			targetUsername = cut(user or name or "", 40), targetDisplayName = cut(name or user or "", 80), createdAt = SV })
+		if not ok then return false, (code == 401 or code == 403) and "refused by the follower rules" or ("HTTP " .. tostring(code)) end
+		local ok2, _, _, code2 = fsReq("PUT", "/followers/" .. id .. "/" .. uid, { ts = SV, rid = LP.UserId,
+			un = cut(LP.Name, 40), dn = cut(LP.DisplayName, 80) })
+		if not ok2 then
+			fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
+			return false, (code2 == 401 or code2 == 403) and "refused by the follower rules (add the 'followers' rules)" or ("HTTP " .. tostring(code2))
+		end
+		FS.following[id] = { n = name or user or id, u = user or "" }
+		local c = FS.cache[id]
+		if c then c.c = c.c + 1 end
+		return true
+	end
+
+	function FS.unfollow(id)
+		local uid = myUid()
+		if not uid then return false, "follower system offline" end
+		local ok = fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
+		local ok2 = fsReq("DELETE", "/followers/" .. id .. "/" .. uid)
+		if not ok or not ok2 then return false, "couldn't remove it, try again" end
+		FS.following[id] = nil
+		local c = FS.cache[id]
+		if c and c.c > 0 then c.c = c.c - 1 end
+		return true
+	end
+
+	function FS.loadMine()
+		if FS.loading then return end
+		local uid = myUid()
+		if not uid then FS.render(); return end
+		FS.loading = true
+		local ok, data = fsReq("GET", "/follows/" .. uid)
+		if ok then
+			local f = {}
+			if type(data) == "table" then
+				for tid, r in pairs(data) do
+					if type(r) == "table" then
+						f[tostring(tid)] = { n = tostring(r.targetDisplayName or r.targetUsername or tid), u = tostring(r.targetUsername or "") }
+					end
+				end
+			end
+			FS.following, FS.loadedF = f, true
+		end
+		local ok2, d2 = fsReq("GET", "/followers/" .. ME)
+		if ok2 then
+			local list = {}
+			if type(d2) == "table" then
+				for _, r in pairs(d2) do
+					if type(r) == "table" and r.rid then
+						list[#list + 1] = { id = idStr(r.rid), n = tostring(r.dn or r.un or "?"), u = tostring(r.un or ""), ts = tonumber(r.ts) or 0 }
+					end
+				end
+			end
+			table.sort(list, function(a, b) return a.ts > b.ts end)
+			FS.followers = list
+			FS.cache[ME] = { c = #list, t = os.clock() }
+		end
+		FS.stamp, FS.loading = os.clock(), false
+		FS.render()
+		if FS.paintThread then FS.paintThread() end
+	end
+
+	function FS.init()
+		if not REQUEST then FS.render(); return end
+		if myUid() then
+			FS.ok = true
+			FS.writeProfile()
+			FS.loadMine()
+		else
+			FS.render()
+		end
+	end
+
+	-- ===== DM thread header: follower count, tier, Follow button =====
+	function FS.paintThread()
+		local id = FS.threadId
+		if not id then return end
+		local c = FS.cache[id]
+		local following = FS.following[id] ~= nil
+		followBtn.Text = following and "Following" or "Follow"
+		followBtn.BackgroundTransparency = following and 0.86 or 0
+		local g = followBtn:FindFirstChildOfClass("UIGradient")
+		if g then g.Enabled = not following end
+		dmSub.Text = c and (c.c .. (c.c == 1 and " follower" or " followers") .. "  •  Tier " .. ROMAN[tierOf(c.c)]) or "…"
+	end
+	function FS.onThread(id, name, user)
+		FS.threadId, FS.threadName, FS.threadUser = id, name, user
+		followBtn.Visible = (id ~= ME)
+		FS.paintThread()
+		task.spawn(function()
+			if not FS.loadedF and not FS.loading then FS.loadMine() end
+			FS.count(id)
+			if FS.threadId == id then FS.paintThread() end
+		end)
+	end
+	local pending = false
+	bind(followBtn.Activated, function()
+		local id = FS.threadId
+		if not id or pending or id == ME then return end
+		pending = true
+		followBtn.Text = "…"
+		task.spawn(function()
+			if not FS.loadedF then FS.loadMine() end
+			local ok, why
+			if FS.following[id] then ok, why = FS.unfollow(id) else ok, why = FS.follow(id, FS.threadName, FS.threadUser) end
+			pending = false
+			if FS.threadId == id then FS.paintThread() end
+			if not ok then views.dm.notice("Couldn't update follow: " .. tostring(why)) end
+			FS.render()
+		end)
+	end)
+
+	-- ===== Profile tab =====
+	local page = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
+	pages[3] = page
+	local sc = newScroll(page)
+
+	local function personRow(e, order, withUnfollow)
+		local r = new("TextButton", { Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, Text = "",
+			AutoButtonColor = false, LayoutOrder = order, Parent = sc }, { corner(14), stroke(0.92) })
+		new("ImageLabel", { Position = UDim2.fromOffset(10, 9), Size = UDim2.fromOffset(32, 32), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Image = thumb(e.id), Parent = r }, { corner(16) })
+		local right = withUnfollow and 100 or 20
+		new("TextLabel", { Position = UDim2.fromOffset(52, 6), Size = UDim2.new(1, -52 - right, 0, 20), BackgroundTransparency = 1,
+			Text = e.n, Font = T.fontB, TextSize = 14, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+		new("TextLabel", { Position = UDim2.fromOffset(52, 26), Size = UDim2.new(1, -52 - right, 0, 16), BackgroundTransparency = 1,
+			Text = (e.u and e.u ~= "") and ("@" .. e.u) or "", Font = T.font, TextSize = 12, TextColor3 = T.mut,
+			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+		if withUnfollow then
+			local ub = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(78, 26),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.86, Text = "Unfollow", Font = T.fontB, TextSize = 12,
+				TextColor3 = T.text, AutoButtonColor = false, Parent = r }, { corner(13) })
+			ub.Activated:Connect(function()
+				ub.Text = "…"
+				task.spawn(function()
+					local ok, why = FS.unfollow(e.id)
+					if not ok then ub.Text = "Retry"; warn("[SAIKI RECHAT] unfollow: " .. tostring(why)) end
+					FS.render()
+					if FS.paintThread then FS.paintThread() end
+				end)
+			end)
+		end
+		r.Activated:Connect(function() showTab(2); openThread(e.id, e.n, e.u) end)
+	end
+
+	function FS.render()
+		if not page.Parent then return end
+		local keep = sc.CanvasPosition
+		clearList(sc)
+		local nFollowing = 0
+		for _ in pairs(FS.following) do nFollowing = nFollowing + 1 end
+		local cnt = (FS.cache[ME] and FS.cache[ME].c) or #FS.followers
+		local tier = tierOf(cnt)
+		local lo, nextAt = CONFIG.TIER_AT[tier], CONFIG.TIER_AT[tier + 1]
+		local pct = nextAt and math.clamp((cnt - lo) / math.max(1, nextAt - lo), 0, 1) or 1
+		local nextTxt = nextAt and ((nextAt - cnt) .. " more for Tier " .. ROMAN[tier + 1]) or "Max tier reached"
+
+		local card = new("Frame", { Size = UDim2.new(1, 0, 0, 128), BackgroundColor3 = WHITE, BackgroundTransparency = 0.93,
+			LayoutOrder = 1, Parent = sc }, { corner(18), stroke(0.9) })
+		new("ImageLabel", { Position = UDim2.fromOffset(14, 12), Size = UDim2.fromOffset(56, 56), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Image = thumb(ME), Parent = card }, { corner(28) })
+		new("TextLabel", { Position = UDim2.fromOffset(82, 14), Size = UDim2.new(1, -196, 0, 22), BackgroundTransparency = 1,
+			Text = LP.DisplayName, Font = T.fontB, TextSize = 17, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+		new("TextLabel", { Position = UDim2.fromOffset(82, 38), Size = UDim2.new(1, -196, 0, 16), BackgroundTransparency = 1,
+			Text = "@" .. LP.Name, Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+		new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 16), Size = UDim2.fromOffset(92, 26),
+			BackgroundColor3 = TCOL[tier], Text = "TIER " .. ROMAN[tier], Font = T.fontB, TextSize = 12, TextColor3 = Color3.fromRGB(14, 16, 24),
+			Parent = card }, { corner(13) })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 72), Size = UDim2.fromOffset(90, 36), BackgroundTransparency = 1, RichText = true,
+			Text = string.format('<font size="20"><b>%d</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWERS</font>', cnt),
+			Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
+		new("TextLabel", { Position = UDim2.fromOffset(112, 72), Size = UDim2.fromOffset(90, 36), BackgroundTransparency = 1, RichText = true,
+			Text = string.format('<font size="20"><b>%d</b></font>\n<font size="11" color="rgb(150,156,175)">FOLLOWING</font>', nFollowing),
+			Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
+		new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 76), Size = UDim2.fromOffset(190, 30),
+			BackgroundTransparency = 1, RichText = true,
+			Text = string.format('<font size="11" color="rgb(150,156,175)">NEXT TIER</font>\n<font size="13"><b>%s</b></font>', nextTxt),
+			Font = T.font, TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Right, Parent = card })
+		local bar = new("Frame", { Position = UDim2.new(0, 14, 1, -14), Size = UDim2.new(1, -28, 0, 5), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Parent = card }, { corner(3) })
+		new("Frame", { Size = UDim2.fromScale(pct, 1), BackgroundColor3 = WHITE, Parent = bar }, { corner(3), grad(0) })
+
+		if not FS.ok and not fsAuth.token then
+			addEmpty(sc, "Follower system offline: " .. tostring(fsAuth.err or "connecting…"), 2, 40)
+		elseif FS.locked then
+			addEmpty(sc, "Your follower profile is tied to an older login on this account. Following still works.", 2, 40)
+		end
+
+		addHeader(sc, "Following", 10, tostring(nFollowing))
+		local fl = {}
+		for id, e in pairs(FS.following) do fl[#fl + 1] = { id = id, n = e.n, u = e.u } end
+		table.sort(fl, function(a, b) return a.n:lower() < b.n:lower() end)
+		if #fl == 0 then addEmpty(sc, "You're not following anyone yet.\nOpen a DM and tap Follow.", 11, 50) end
+		for i, e in ipairs(fl) do personRow(e, 11 + i, true) end
+
+		addHeader(sc, "Followers", 1000, tostring(#FS.followers))
+		if #FS.followers == 0 then addEmpty(sc, "No followers yet.", 1001, 36) end
+		for i, e in ipairs(FS.followers) do
+			if i > CONFIG.TIER_AT[#CONFIG.TIER_AT] + 30 then break end
+			personRow(e, 1001 + i, false)
+		end
+		sc.CanvasPosition = keep
+	end
+
+	local prevShow = onShowTab
+	onShowTab = function(i)
+		if prevShow then prevShow(i) end
+		if i == 3 then
+			FS.render()
+			if os.clock() - FS.stamp > 45 and not FS.loading then task.spawn(FS.loadMine) end
+		end
+	end
+	FS.render()
+end
+
+----------------------------------------------------------------- sticker picker
+local picker, pickerLoadId = nil, 0
+local currentCat = STICKER_REPOS[1].repo
+
+function closePicker()
+	local p = picker
+	if not p then return end
+	picker = nil
+	tween(p, 0.18, { GroupTransparency = 1, Position = UDim2.new(0.5, 0, 1, -50) })
+	task.delay(0.2, function() p:Destroy() end)
+end
+
+local function openPicker(view)
+	if picker then closePicker(); return end
+	local p = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -50),
+		Size = UDim2.new(1, -24, 0, 220), BackgroundColor3 = T.bg, BackgroundTransparency = 0.03,
+		GroupTransparency = 1, ZIndex = 20, Parent = win }, { corner(18), stroke(0.8) })
+	picker = p
+	local cats = new("ScrollingFrame", { Position = UDim2.fromOffset(10, 10), Size = UDim2.new(1, -20, 0, 30),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 0, CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.X, ScrollingDirection = Enum.ScrollingDirection.X, Parent = p }, {
+		new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6),
+			SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+	local grid = new("ScrollingFrame", { Position = UDim2.fromOffset(10, 48), Size = UDim2.new(1, -20, 1, -56),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = T.mut,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = p }, {
+		new("UIGridLayout", { CellSize = UDim2.fromOffset(72, 72), CellPadding = UDim2.fromOffset(6, 6) }),
+	})
+	local chips = {}
+	local function loadCategory(repo)
+		currentCat = repo
+		pickerLoadId += 1
+		local id = pickerLoadId
+		for r, c in pairs(chips) do c.BackgroundTransparency = (r == repo) and 0.7 or 0.93 end
+		for _, c in ipairs(grid:GetChildren()) do
+			if c:IsA("GuiObject") then c:Destroy() end
+		end
+		local msg = new("TextLabel", { Size = UDim2.fromOffset(280, 24), BackgroundTransparency = 1, Text = "Loading stickers…",
+			Font = T.font, TextSize = 13, TextColor3 = T.mut, Parent = grid })
+		task.spawn(function()
+			local list = getListing(repo)
+			if id ~= pickerLoadId or not p.Parent then return end
+			if not list then msg.Text = "Couldn't load stickers (GitHub unreachable)."; return end
+			if #list == 0 then msg.Text = "No stickers in this pack yet."; return end
+			msg:Destroy()
+			for i, name in ipairs(list) do
+				if i > 80 then break end
+				local ref = repo .. "/" .. name
+				local tile = new("ImageButton", { BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, Image = "",
+					ScaleType = Enum.ScaleType.Fit, AutoButtonColor = false, LayoutOrder = i, Parent = grid }, { corner(12) })
+				tile.Activated:Connect(function()
+					if view.sendSticker(ref) then closePicker() end
+				end)
+				task.spawn(function()
+					local a = stickerAsset(ref)
+					if a and tile.Parent then tile.Image = a; tile.BackgroundTransparency = 0.97 end
+				end)
+			end
+		end)
+	end
+	for i, def in ipairs(STICKER_REPOS) do
+		local chip = new("TextButton", { Size = UDim2.fromOffset(78, 30), BackgroundColor3 = WHITE, BackgroundTransparency = 0.93,
+			Text = def.name, Font = T.fontB, TextSize = 12, TextColor3 = T.text, AutoButtonColor = false, LayoutOrder = i,
+			Parent = cats }, { corner(15) })
+		chips[def.repo] = chip
+		chip.Activated:Connect(function() loadCategory(def.repo) end)
+	end
+	loadCategory(currentCat)
+	tween(p, 0.26, { GroupTransparency = 0, Position = UDim2.new(0.5, 0, 1, -64) })
+end
+bind(views[1].stickerBtn.Activated, function() openPicker(views[1]) end)
+bind(views.dm.stickerBtn.Activated, function() openPicker(views.dm) end)
+
+----------------------------------------------------------------- message menu (React / Reply / Copy) + toast
+local function toast(msg)
+	local l = new("TextLabel", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -70),
+		Size = UDim2.fromOffset(0, 30), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = T.bg,
+		BackgroundTransparency = 0.1, Text = msg, Font = T.fontB, TextSize = 13, TextColor3 = T.text, ZIndex = 40,
+		Parent = win }, { corner(15), stroke(0.8), pad(0, 16) })
+	task.delay(1.2, function()
+		if not l.Parent then return end
+		tween(l, 0.25, { BackgroundTransparency = 1, TextTransparency = 1 })
+		task.delay(0.3, function() l:Destroy() end)
+	end)
+end
+
+local menu
+function closeMenu()
+	local m = menu
+	if not m then return end
+	menu = nil
+	tween(m.card, 0.15, { GroupTransparency = 1 })
+	task.delay(0.17, function() m.root:Destroy() end)
+end
+
+function openMenu(view, item, obj)
+	if menu then closeMenu() end
+	if closePicker then closePicker() end
+	local hasCopy = (not item.stk) and item.text and item.text ~= ""
+	local h = 20 + 44 + 6 + 38 + (hasCopy and 44 or 0)
+	local root = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.55, Text = "", AutoButtonColor = false, ZIndex = 30, Parent = win })
+	root.Activated:Connect(closeMenu)
+	local sc = winScale.Scale
+	local wx = (obj.AbsolutePosition.X - win.AbsolutePosition.X + obj.AbsoluteSize.X / 2) / sc
+	local wy = (obj.AbsolutePosition.Y - win.AbsolutePosition.Y) / sc
+	local maxY = win.AbsoluteSize.Y / sc - h - 12
+	local y = wy - h - 6
+	if y < 56 then y = wy + obj.AbsoluteSize.Y / sc + 6 end -- not enough room above: show below
+	y = math.clamp(y, 56, math.max(56, maxY))
+	local x = math.clamp(wx, 138, math.max(138, win.AbsoluteSize.X / sc - 138))
+	local card = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.fromOffset(x, y + 8),
+		Size = UDim2.fromOffset(264, h), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02, GroupTransparency = 1,
+		ZIndex = 31, Parent = root }, { corner(18), stroke(0.78), pad(10, 10),
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6) }) })
+	menu = { root = root, card = card }
+
+	local mineE = (view.reacts[item.key] or {})[ME]
+	local rrow = new("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundTransparency = 1, LayoutOrder = 1, Parent = card },
+		{ new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center, VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 4) }) })
+	for i, e in ipairs(REACTIONS) do
+		local b = new("TextButton", { Size = UDim2.fromOffset(36, 36), LayoutOrder = i, BackgroundColor3 = (mineE == e) and T.accA or WHITE,
+			BackgroundTransparency = (mineE == e) and 0.4 or 0.93, Text = e, TextSize = 22, Font = T.font, AutoButtonColor = false,
+			Parent = rrow }, { corner(18) })
+		b.Activated:Connect(function() view.react(item.key, e); closeMenu() end)
+	end
+	local function action(text, order, fn)
+		local b = new("TextButton", { Size = UDim2.new(1, 0, 0, 38), LayoutOrder = order, BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.93, Text = text, Font = T.fontB, TextSize = 14, TextColor3 = T.text,
+			AutoButtonColor = false, Parent = card }, { corner(12) })
+		b.Activated:Connect(function() closeMenu(); fn() end)
+	end
+	action("Reply", 2, function() view.setReply(item) end)
+	if hasCopy then
+		action("Copy text", 3, function()
+			local fn = setclipboard or toclipboard or (syn and syn.write_clipboard)
+			if fn and pcall(fn, item.text) then toast("Copied") else toast("Clipboard not supported here") end
+		end)
+	end
+	tween(card, 0.2, { GroupTransparency = 0, Position = UDim2.fromOffset(x, y) })
+end
+
+----------------------------------------------------------------- profile card (tap any profile picture)
+local profile
+function closeProfile()
+	local pr = profile
+	if not pr then return end
+	profile = nil
+	tween(pr.card, 0.15, { GroupTransparency = 1 })
+	task.delay(0.17, function() pr.root:Destroy() end)
+end
+
+function openProfile(uid, name, user)
+	uid = string.format("%.0f", tonumber(uid) or 0)
+	if uid == "0" then return end
+	if closePicker then closePicker() end
+	if closeMenu then closeMenu() end
+	if profile then closeProfile() end
+	local mine = (uid == ME)
+
+	-- best known name / username (live player > saved directory > what the message carried)
+	local pl = Players:GetPlayerByUserId(tonumber(uid))
+	if pl then name, user = pl.DisplayName, pl.Name
+	elseif directory[uid] then
+		name = name or directory[uid].d
+		user = (user and user ~= "") and user or directory[uid].n
+	end
+	name = (name and name ~= "") and name or user or "Player"
+
+	local root = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.55, Text = "", AutoButtonColor = false, ZIndex = 30, Parent = win })
+	root.Activated:Connect(closeProfile)
+	local card = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 10),
+		Size = UDim2.fromOffset(250, 222), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02, GroupTransparency = 1,
+		Active = true, ZIndex = 31, Parent = root }, { corner(20), stroke(0.78) })
+	local me = { root = root, card = card }
+	profile = me
+
+	new("ImageLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 16), Size = UDim2.fromOffset(64, 64),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Image = thumb(uid), Parent = card }, { corner(32) })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 86), Size = UDim2.new(1, -28, 0, 22), BackgroundTransparency = 1,
+		Text = name, Font = T.fontB, TextSize = 17, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	local userLbl = new("TextLabel", { Position = UDim2.fromOffset(14, 108), Size = UDim2.new(1, -28, 0, 16), BackgroundTransparency = 1,
+		Text = (user and user ~= "") and ("@" .. user) or "", Font = T.font, TextSize = 12, TextColor3 = T.mut,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+	local closeX = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), Size = UDim2.fromOffset(26, 26),
+		BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 20, TextColor3 = T.mut, AutoButtonColor = false, Parent = card })
+	closeX.Activated:Connect(closeProfile)
+
+	-- followers + tier
+	local stats = new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, -34, 0, 134), Size = UDim2.fromOffset(120, 22),
+		BackgroundTransparency = 1, Text = "…", Font = T.font, TextSize = 12, TextColor3 = T.text,
+		TextXAlignment = Enum.TextXAlignment.Right, Parent = card })
+	local chip = new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 56, 0, 135), Size = UDim2.fromOffset(60, 20),
+		BackgroundColor3 = FS.TCOL[1], Text = "", Font = T.fontB, TextSize = 11, TextColor3 = Color3.fromRGB(14, 16, 24),
+		Visible = false, Parent = card }, { corner(10) })
+
+	local function button(text, x, w, primary)
+		local b = new("TextButton", { Position = UDim2.new(0, x, 0, 168), Size = UDim2.new(0, w, 0, 36),
+			BackgroundColor3 = WHITE, BackgroundTransparency = primary and 0 or 0.9, Text = text, Font = T.fontB, TextSize = 14,
+			TextColor3 = WHITE, AutoButtonColor = false, Parent = card }, { corner(18) })
+		if primary then new("UIGradient", { Color = ColorSequence.new(T.accA, T.accB), Rotation = 20, Parent = b }) end
+		return b
+	end
+
+	local function paint()
+		if profile ~= me then return end
+		local c = FS.cache[uid]
+		if c then
+			stats.Text = c.c .. (c.c == 1 and " follower" or " followers")
+			local t = FS.tierOf(c.c)
+			chip.Text, chip.BackgroundColor3, chip.Visible = "TIER " .. FS.ROMAN[t], FS.TCOL[t], true
+		end
+	end
+	paint()
+
+	if mine then
+		local mp = button("My profile", 16, 218, true)
+		mp.Activated:Connect(function() closeProfile(); showTab(3) end)
+	else
+		local fbtn = button("Follow", 16, 106, true)
+		local dbtn = button("DM", 128, 106, false)
+		local g = fbtn:FindFirstChildOfClass("UIGradient")
+		local function paintFollow()
+			if profile ~= me then return end
+			local following = FS.following[uid] ~= nil
+			fbtn.Text = following and "Following" or "Follow"
+			fbtn.BackgroundTransparency = following and 0.9 or 0
+			if g then g.Enabled = not following end
+		end
+		paintFollow()
+		local busy = false
+		fbtn.Activated:Connect(function()
+			if busy then return end
+			busy = true
+			fbtn.Text = "…"
+			task.spawn(function()
+				if not FS.loadedF and not FS.loading then FS.loadMine() end
+				local ok, why
+				if FS.following[uid] then ok, why = FS.unfollow(uid) else ok, why = FS.follow(uid, name, user) end
+				busy = false
+				if not ok then
+					warn("[SAIKI RECHAT] follow: " .. tostring(why))
+					toast("Couldn't update follow")
+				end
+				paintFollow(); paint()
+				FS.render()
+				if FS.paintThread then FS.paintThread() end
+			end)
+		end)
+		dbtn.Activated:Connect(function()
+			local n, u = name, user
+			closeProfile()
+			if not isOpen then return end
+			showTab(2)
+			openThread(uid, n, u)
+		end)
+		task.spawn(function()
+			if REQUEST then
+				if not FS.loadedF and not FS.loading then FS.loadMine() end
+				paintFollow()
+			end
+		end)
+	end
+
+	-- followers count (cached 60s) + username if the message didn't carry one
+	task.spawn(function()
+		if REQUEST then FS.count(uid) end
+		paint()
+	end)
+	if not user or user == "" then
+		task.spawn(function()
+			local ok, nm = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(uid)) end)
+			if ok and nm and profile == me then user = nm; userLbl.Text = "@" .. nm end
+		end)
+	end
+
+	tween(card, 0.22, { GroupTransparency = 0, Position = UDim2.fromScale(0.5, 0.5) }, Enum.EasingStyle.Back)
+end
+
+-- pull reactions for the latest messages of a stream and push them into the view
+local function pollReactions(path, tAuth, base, view)
+	if not path then return end
+	local ok, data = dbRequest("GET", path, nil, tAuth, base, 'orderBy="$key"&limitToLast=60')
+	if not ok then return end
+	data = (type(data) == "table") and data or {}
+	for key, map in pairs(data) do
+		if type(map) == "table" then
+			local good = {}
+			for uid, e in pairs(map) do
+				if type(e) == "string" and ALLOWED_REACT[e] and not banned[tonumber(uid)] then good[tostring(uid)] = e end
+			end
+			view.setReactions(tostring(key), good)
+		end
+	end
+	local stale = {}
+	for key in pairs(view.reacts) do if data[key] == nil then stale[#stale + 1] = key end end
+	for _, key in ipairs(stale) do view.setReactions(key, {}) end
+end
+
+----------------------------------------------------------------- scheduler (one loop for everything)
+task.spawn(function()
+	local n = 0
+	while alive do
+		n += 1
+		if CONFIG.HIDE_ROBLOX_CHAT and n % 2 == 1 then setRbxChat(false) end
+		if REQUEST then
+			if (isOpen and cur == 1) or n % 3 == 0 then pollStream(serverStream, serverHandler) end
+			if isOpen and cur == 1 and n % 2 == 0 then pollReactions(serverStream.rpath, auth, FIREBASE_DB, views[1]) end
+			if isOpen and cur == 2 and dmStream and thread.Visible then
+				local s = dmStream
+				pollStream(s, function(k, m, silent) if s == dmStream then dmHandler(k, m) end end)
+				if s == dmStream and n % 2 == 0 then pollReactions(s.rpath, dmAuth, DM_FIREBASE_DB, views.dm) end
+			end
+			if n % 3 == 1 then pollInbox() end                 -- ~7.5s: ONE small request tells me who messaged
+			if n == 2 and not legacyDone then discoverLegacy() end -- once per install
+			if n == 3 or n % 360 == 0 then syncDirectory() end -- Saiki users list (only changes since last sync)
+			if n == 4 then task.spawn(writeMyProfile) end
+			if n == 5 then task.spawn(loadFriends) end
+			if n == 6 or (n % 60 == 0 and not FS.ok) then task.spawn(FS.init) end -- follower login + own profile
+			if n % 120 == 0 and FS.ok then task.spawn(FS.loadMine) end        -- refresh my followers/following every ~5 min
+			if n == 7 and home.Visible and isOpen and cur == 2 then refreshHome() end -- friends / directory just arrived
+		end
+		if n % 2 == 0 then flushAll(false) end
+		task.wait(CONFIG.POLL)
+	end
+end)
+
+----------------------------------------------------------------- cleanup + API
+local function Destroy()
+	if not alive then return end
+	alive = false
+	pcall(flushAll, true)
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	pcall(function() gui:Destroy() end)
+	pcall(function() if blur then blur:Destroy() end end)
+	if CONFIG.HIDE_ROBLOX_CHAT then setRbxChat(true) end
+	genv.SaikiRechat = nil
+end
+genv.SaikiRechat = { Destroy = Destroy, Toggle = function() setOpen(not isOpen) end }
+
+----------------------------------------------------------------- identity guard loop (every ~45s)
+task.spawn(function()
+	local strikes, rounds = 0, 0
+	while alive do
+		task.wait(CONFIG.IDENTITY_INTERVAL)
+		if not alive then break end
+		rounds += 1
+		local r = checkIdentity(false) -- display name is only compared with the API at launch
+		if r == "spoof" then
+			kick(KICK_SPOOF); Destroy(); break
+		elseif r == "mismatch" then
+			strikes += 1
+			if strikes >= 2 then kick(KICK_SPOOF); Destroy(); break end
+		elseif r == "ok" then
+			strikes = 0
+		end
+		if rounds % 13 == 0 then -- ~every 10 minutes
+			loadBanList()
+			if isBanned() then kick(KICK_BAN); Destroy(); break end
+		end
+	end
+end)
