@@ -1918,7 +1918,7 @@ end
 			Size = UDim2.fromOffset(300, 236), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02, GroupTransparency = 1,
 			ZIndex = 31, Parent = root }, { corner(20), stroke(0.78) })
 		-- swallow taps on the card so they don't close it
-		new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, Parent = card })
+		new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 0, Parent = card })
 		P.root, P.card, P.id = root, card, id
 
 		new("ImageLabel", { Position = UDim2.fromOffset(18, 18), Size = UDim2.fromOffset(64, 64), BackgroundColor3 = WHITE,
@@ -1952,23 +1952,21 @@ end
 			TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
 
 		local followBtn, dmBtn
-		if isMe then
-			dmBtn = new("TextButton", { Position = UDim2.fromOffset(18, 184), Size = UDim2.fromOffset(264, 36), BackgroundColor3 = WHITE,
-				Text = "Open my Profile tab", Font = T.fontB, TextSize = 14, TextColor3 = WHITE, AutoButtonColor = false, Parent = card },
-				{ corner(18), grad(20) })
-			dmBtn.Activated:Connect(function() T.closeProfile(); showTab(3) end)
-		else
-			followBtn = new("TextButton", { Position = UDim2.fromOffset(18, 184), Size = UDim2.fromOffset(170, 36), BackgroundColor3 = T.accA,
-				Text = "Follow", Font = T.fontB, TextSize = 14, TextColor3 = WHITE, AutoButtonColor = false, Parent = card }, { corner(18) })
-			dmBtn = new("TextButton", { Position = UDim2.fromOffset(196, 184), Size = UDim2.fromOffset(86, 36), BackgroundColor3 = WHITE,
-				BackgroundTransparency = 0.86, Text = "DM", Font = T.fontB, TextSize = 14, TextColor3 = T.text, AutoButtonColor = false,
-				Parent = card }, { corner(18), stroke(0.85) })
-			dmBtn.Activated:Connect(function()
-				T.closeProfile()
-				showTab(2)
-				openThread(id, name, user)
-			end)
-		end
+		followBtn = new("TextButton", { Position = UDim2.fromOffset(18, 184), Size = UDim2.fromOffset(170, 36), BackgroundColor3 = T.accA,
+			Text = "Follow", Font = T.fontB, TextSize = 14, TextColor3 = WHITE, TextTransparency = 0, AutoButtonColor = false, ZIndex = 5,
+			Parent = card }, { corner(18) })
+		dmBtn = new("TextButton", { Position = UDim2.fromOffset(196, 184), Size = UDim2.fromOffset(86, 36), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.86, Text = "DM", Font = T.fontB, TextSize = 14, TextColor3 = T.text, TextTransparency = 0,
+			AutoButtonColor = false, ZIndex = 5, Parent = card }, { corner(18), stroke(0.85) })
+		dmBtn.Activated:Connect(function()
+			if isMe then
+				statusLbl.Text = "can't DM yourself lol"
+				return
+			end
+			T.closeProfile()
+			showTab(2)
+			openThread(id, name, user)
+		end)
 
 		local done = false
 		local function paint()
@@ -2015,6 +2013,10 @@ end
 		local pending = false
 		if followBtn then
 			followBtn.Activated:Connect(function()
+				if isMe then
+					statusLbl.Text = "can't follow yourself lol"
+					return
+				end
 				if pending then return end
 				pending = true
 				followBtn.Text = "…"
@@ -2024,7 +2026,7 @@ end
 					local ok, why
 					if FS.following[id] then ok, why = FS.unfollow(id) else ok, why = FS.follow(id, name, user) end
 					pending = false
-									if FS.threadId == id and FS.paintThread then FS.paintThread() end
+					if FS.threadId == id and FS.paintThread then FS.paintThread() end
 					FS.render()
 					if P.root == root then
 						paint()
