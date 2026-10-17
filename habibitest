@@ -2322,8 +2322,8 @@ local function pollReactions(path, tAuth, base, view)
 	for _, key in ipairs(stale) do view.setReactions(key, {}) end
 end
 
------------------------------------------------------------------ settings tab
-do
+----------------------------------------------------------------- settings tab (own function: keeps the main chunk under the 200-local limit)
+;(function()
 	local TextService = game:GetService("TextService")
 	local V = SET.v
 	local DISCORD, DISCORD_CODE = "https://discord.gg/63eEChZ6YU", "63eEChZ6YU"
@@ -2650,7 +2650,7 @@ do
 	order += 1
 	new("TextLabel", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Text = "Saiki Rechat V2.8  ·  settings save automatically on this device",
 		Font = T.font, TextSize = 11, TextColor3 = T.mut, LayoutOrder = order, Parent = sc })
-end
+end)()
 
 ----------------------------------------------------------------- scheduler (one loop for everything)
 task.spawn(function()
