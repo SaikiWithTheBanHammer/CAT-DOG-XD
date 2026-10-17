@@ -1090,6 +1090,9 @@ local function serverHandler(key, m, silent)
 	local name = p and p.DisplayName or (type(m.dn) == "string" and m.dn:sub(1, 40)) or "Player"
 	views[1].add({ uid = uid, name = name, text = text, stk = stk, key = key, reply = parseReply(m) })
 	if not silent then markUnread(1, uid) end
+	if not silent and not isOpen and tostring(uid) ~= ME and T.notify then -- window closed: pop-up for new server chat messages
+		T.notify("srv", "Server chat  ·  " .. name, stk and "Sticker" or text)
+	end
 end
 if REQUEST then task.spawn(function() pollStream(serverStream, serverHandler) end) end -- remember "now", draw nothing old
 
@@ -1545,7 +1548,14 @@ views.dm = ChatView(thread, function(p)
 				renderStored(st)
 			end
 			-- tiny "inbox" ping so the other person only needs ONE cheap request to learn about new DMs
-			dbRequest("PUT", "/dminbox/" .. partner .. "/" .. ME, { ts = SV, k = res.name }, dmAuth, DM_FIREBASE_DB)
+			local okp, _, rawp, codep = dbRequest("PUT", "/dminbox/" .. partner .. "/" .. ME, { ts = SV, k = res.name }, dmAuth, DM_FIREBASE_DB)
+			if not okp then
+				task.wait(1)
+				okp, _, rawp, codep = dbRequest("PUT", "/dminbox/" .. partner .. "/" .. ME, { ts = SV, k = res.name }, dmAuth, DM_FIREBASE_DB)
+				if not okp then
+					warn("[SAIKI RECHAT] DM sent, but the inbox ping failed (HTTP " .. tostring(codep) .. "): " .. tostring(rawp):sub(1, 200) .. " . They will only see it in Recent once they open the chat.")
+				end
+			end
 		else
 			sendFail(views.dm, raw, code, "sxkidirect " .. s.path)
 		end
@@ -1566,6 +1576,9 @@ local function dmHandler(key, m)
 	local e = touchIndex(dm.partner, st, dm.name)
 	if isOpen and cur == 2 and thread.Visible then e.r = st.k end -- I'm looking at it: counts as read
 	renderStored(st)
+	if uid ~= ME and not (isOpen and cur == 2 and thread.Visible) and T.notify then
+		T.notify("dm" .. tostring(dm.partner), "New DM  ·  " .. tostring(dm.name or "Someone"), st.s and "Sticker" or st.t)
+	end
 end
 
 function openThread(id, name, user)
@@ -1617,13 +1630,16 @@ local function fetchNew(pid, inboxTs)
 	local rows = {}
 	for k, v in pairs(data) do if type(v) == "table" then rows[#rows + 1] = { k = tostring(k), v = v } end end
 	table.sort(rows, function(a, b) return a.k < b.k end)
-	local have, added = {}, false
+	local have, added, lastIn = {}, false, nil
 	for _, st in ipairs(msgs) do have[st.k] = true end
 	for _, it in ipairs(rows) do
 		local uid = tostring(it.v.uid or "")
 		if not have[it.k] and (uid == ME or uid == pid) and not banned[tonumber(uid)] then
 			local st = toStored(it.k, it.v)
-			if st then msgs[#msgs + 1] = st; added = true; touchIndex(pid, st) end
+			if st then
+				msgs[#msgs + 1] = st; added = true; touchIndex(pid, st)
+				if st.u == pid then lastIn = st end
+			end
 		end
 	end
 	local e = index[pid] or touchIndex(pid, nil)
@@ -1631,12 +1647,22 @@ local function fetchNew(pid, inboxTs)
 	if added then saveConv(pid, msgs) end
 	resolveName(pid)
 	indexDirty = true
+	if lastIn and T.inboxReady and T.notify then -- (the very first sync is summarised as "Unread DMs" instead)
+		T.notify("dm" .. pid, "New DM  ·  " .. tostring((index[pid] and index[pid].n) or "Someone"), lastIn.s and "Sticker" or lastIn.t)
+	end
 end
 
 local function pollInbox()
 	T.dmId()
-	local ok, data = dbRequest("GET", "/dminbox/" .. ME, nil, dmAuth, DM_FIREBASE_DB)
-	if not ok or type(data) ~= "table" then return end
+	local ok, data, _, code = dbRequest("GET", "/dminbox/" .. ME, nil, dmAuth, DM_FIREBASE_DB)
+	if not ok then
+		if not T.inboxWarned then
+			T.inboxWarned = true
+			warn("[SAIKI RECHAT] couldn't read your DM inbox (HTTP " .. tostring(code) .. "). New DMs won't show in Recent until this works; publish the latest sxkidirect rules.")
+		end
+		return
+	end
+	if type(data) ~= "table" then data = {} end
 	local work = 0
 	for pid, v in pairs(data) do
 		if type(v) == "table" and tostring(pid):match("^%d+$") then
@@ -1649,6 +1675,14 @@ local function pollInbox()
 		end
 	end
 	refreshUnread()
+	if not T.inboxReady and work < 5 then -- first full sync done: one summary of everything waiting
+		T.inboxReady = true
+		local n = 0
+		for pid in pairs(index) do if isUnread(pid) then n += 1 end end
+		if n > 0 and T.notify then
+			T.notify("unread", "Unread DMs", n == 1 and "You have 1 unread conversation" or ("You have " .. n .. " unread conversations"))
+		end
+	end
 end
 
 -- once per install: find DM threads that already exist (older script versions had no inbox pings)
@@ -2625,6 +2659,63 @@ local function pollReactions(path, tAuth, base, view)
 	for _, key in ipairs(stale) do view.setReactions(key, {}) end
 end
 
+----------------------------------------------------------------- notifications (bottom-left, hide after 3s, cross to dismiss)
+do
+	local holder = new("Frame", { Name = "SaikiNotifs", AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 16, 1, -16),
+		Size = UDim2.fromOffset(300, 260), BackgroundTransparency = 1, ZIndex = 100, Parent = gui }, {
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			Padding = UDim.new(0, 6) }),
+	})
+	local active, seq = {}, 0
+	local function kill(n)
+		if n.dead then return end
+		n.dead = true
+		for i, x in ipairs(active) do if x == n then table.remove(active, i); break end end
+		if T.anim ~= false and n.card.Parent then
+			tween(n.card, 0.2, { GroupTransparency = 1 })
+			task.delay(0.22, function() n.card:Destroy() end)
+		else
+			n.card:Destroy()
+		end
+	end
+	function T.clearNotifs()
+		for i = #active, 1, -1 do kill(active[i]) end
+	end
+	-- key: same key = refresh the card that is already showing (no spam); head/body: the two text lines
+	function T.notify(key, head, body)
+		if not alive or T.notif == false then return end
+		for _, n in ipairs(active) do
+			if n.key == key then
+				n.head.Text, n.body.Text, n.t = head, tostring(body or ""), os.clock()
+				return
+			end
+		end
+		while #active >= 4 do kill(active[1]) end
+		seq = seq + 1
+		local card = new("CanvasGroup", { Size = UDim2.fromOffset(300, 56), BackgroundColor3 = T.bg, BackgroundTransparency = 0.06,
+			GroupTransparency = (T.anim ~= false) and 1 or 0, LayoutOrder = seq, ZIndex = 100, Parent = holder }, { corner(14), stroke(0.8) })
+		local n = { key = key, card = card, t = os.clock() }
+		n.head = new("TextLabel", { Position = UDim2.fromOffset(14, 8), Size = UDim2.new(1, -48, 0, 16), BackgroundTransparency = 1,
+			Text = head, Font = T.fontB, TextSize = 12, TextColor3 = T.accB, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 101, Parent = card })
+		n.body = new("TextLabel", { Position = UDim2.fromOffset(14, 27), Size = UDim2.new(1, -48, 0, 20), BackgroundTransparency = 1,
+			Text = tostring(body or ""), Font = T.font, TextSize = 13, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 101, Parent = card })
+		local x = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), Size = UDim2.fromOffset(22, 22),
+			BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = "×", Font = T.fontB, TextSize = 16, TextColor3 = T.text,
+			AutoButtonColor = false, ZIndex = 102, Parent = card }, { corner(11) })
+		x.Activated:Connect(function() kill(n) end)
+		active[#active + 1] = n
+		if T.anim ~= false then tween(card, 0.25, { GroupTransparency = 0 }) end
+		task.spawn(function() -- gone by itself after 3 seconds
+			while alive and not n.dead do
+				task.wait(0.25)
+				if os.clock() - n.t >= 3 then kill(n) end
+			end
+		end)
+	end
+end
+
 ----------------------------------------------------------------- scheduler (one loop for everything)
 task.spawn(function()
 	local n = 0
@@ -3060,7 +3151,7 @@ local THEMES = {
 	Forest = { bg = Color3.fromRGB(10, 22, 16), accA = Color3.fromRGB(60, 190, 120),  accB = Color3.fromRGB(150, 225, 80) },
 }
 local ORDER = { "Dark", "AMOLED", "Ocean", "Sunset", "Forest" }
-local V = { theme = "Dark", anim = true, aura = true, guiMul = 1, anchored = true, ox = 0, oy = 0 }
+local V = { theme = "Dark", anim = true, aura = true, notif = true, guiMul = 1, anchored = true, ox = 0, oy = 0 }
 pcall(function()
 	if isfile and readfile and isfile(FILE) then
 		local d = HttpService:JSONDecode(readfile(FILE))
@@ -3068,6 +3159,7 @@ pcall(function()
 			if THEMES[d.theme] then V.theme = d.theme end
 			if type(d.anim) == "boolean" then V.anim = d.anim end
 			if type(d.aura) == "boolean" then V.aura = d.aura end
+			if type(d.notif) == "boolean" then V.notif = d.notif end
 			if type(d.anchored) == "boolean" then V.anchored = d.anchored end
 			if type(d.guiMul) == "number" then V.guiMul = math.clamp(d.guiMul, 0.6, 1.3) end
 			if type(d.ox) == "number" then V.ox = d.ox end
@@ -3164,6 +3256,17 @@ toggleRow("Chat Rendering",
 		if H.blur and H.open() then tween(H.blur, 0.3, { Size = v and 14 or 0 }) end
 		save()
 		toast(v and "Smooth rendering" or "Lite rendering")
+	end)
+
+---------------------------------------------------------------- notifications
+header("Notifications")
+toggleRow("Notifications",
+	"ON: small pop-ups appear at the bottom left for new DMs, for unread DMs when the script loads, and for new messages in the server chat while the chat window is closed. They hide by themselves after 3 seconds, or tap the \195\151 to close one. OFF: no pop-ups at all (the unread dots still work).",
+	V.notif, function(v)
+		V.notif, T.notif = v, v
+		if not v and T.clearNotifs then T.clearNotifs() end
+		save()
+		toast(v and "Notifications on" or "Notifications off")
 	end)
 
 ---------------------------------------------------------------- theme
@@ -3409,7 +3512,7 @@ new("TextLabel", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Te
 	Font = T.font, TextSize = 11, TextColor3 = T.mut, LayoutOrder = order, Parent = sc })
 
 ---------------------------------------------------------------- apply saved settings
-T.anim, T.aura, T.guiMul = V.anim, V.aura, V.guiMul
+T.anim, T.aura, T.guiMul, T.notif = V.anim, V.aura, V.guiMul, V.notif
 if not V.anim then CONFIG.MAX_MESSAGES = 40 end
 if V.theme ~= "Dark" then setTheme(V.theme) end
 H.expose(V)
