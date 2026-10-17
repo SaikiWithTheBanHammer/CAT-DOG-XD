@@ -1,5 +1,5 @@
 --[[
-	SAIKI RECHAT V2.6 (client-side, Luau / executor)
+	SAIKI RECHAT V2.8 (client-side, Luau / executor)
 	V2.3 adds: new DM homepage (Recent / In Server / Search), local DM history cache,
 	            lightweight inbox polling, Saiki user directory search.
 	V2.2 adds: long-press / right-click message menu (React, Reply, Copy text).
@@ -59,6 +59,13 @@ local CONFIG = {
 	DM_SHOW = 60,             -- messages drawn when a DM opens (older stay on disk)
 	STICKER_LIST_TTL = 86400, -- seconds before re-checking GitHub for new stickers
 	TIER_AT = { 0, 30, 60, 90, 120 }, -- followers needed for Tier I, II, III, IV, V (edit freely)
+	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (rewards are not live yet)
+		{},
+		{ "Title 1", "Aura 1" },
+		{ "Title 2", "Aura 2" },
+		{ "Title 3", "Aura 3" },
+		{ "Title 4", "Aura 4", "Announcement command" },
+	},
 	-- security
 	IDENTITY_INTERVAL = 45,   -- seconds between identity checks
 	AGE_TOLERANCE_DAYS = 3,   -- allowed difference between in-game and Roblox-API account age
@@ -288,7 +295,13 @@ end
 
 -- log in to all three projects right away so the first message never waits on a login
 if REQUEST then
-	task.spawn(function() ensureToken(auth); ensureToken(dmAuth); ensureToken(fsAuth) end)
+	task.spawn(function()
+		for _, t in ipairs({ auth, dmAuth, fsAuth }) do
+			if not ensureToken(t) then
+				warn("[SAIKI RECHAT] login FAILED for " .. t.name .. ": " .. tostring(t.err) .. " (check that project's Web API key and Authentication > Anonymous)")
+			end
+		end
+	end)
 end
 
 ----------------------------------------------------------------- persistent cache + stickers
@@ -948,9 +961,9 @@ local function pollStream(s, handler)
 end
 
 local function payload(p)
-	local d = { uid = ME, dn = LP.DisplayName, un = LP.Name, pfp = 1,
-		txt = p.stk and "[sticker]" or p.text, stk = p.stk, ts = SV }
-	if p.reply then d.rk, d.rn, d.rt = p.reply.k, p.reply.n, p.reply.t end
+	local d = { uid = ME, dn = cut(LP.DisplayName, 40), un = cut(LP.Name, 40), pfp = 1,
+		txt = p.stk and "[sticker]" or cut(p.text, 200), stk = p.stk, ts = SV }
+	if p.reply then d.rk, d.rn, d.rt = cut(p.reply.k, 40), cut(p.reply.n, 40), cut(p.reply.t, 60) end
 	return d
 end
 local function parseReply(m)
@@ -964,7 +977,7 @@ local function sendFail(view, raw, code, dbName)
 	local why
 	if code == 401 or code == 403 then
 		local msg = tostring(raw):match('"error"%s*:%s*"([^"]+)"') or "denied"
-		why = tostring(dbName or "database") .. " refused the write (" .. code .. ": " .. msg .. "). Check its rules are published"
+		why = tostring(dbName or "database") .. " refused the write (" .. code .. ": " .. msg .. "). Publish the latest rules for that project"
 	elseif code == 400 then why = "Firebase rejected the request (400)"
 	elseif not code then why = tostring(raw or "no response"):sub(1, 90)
 	else why = "HTTP " .. tostring(code) end
@@ -1005,7 +1018,7 @@ views[1] = ChatView(container, function(p)
 				views[1].add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply, key = res.name })
 			end
 		else
-			sendFail(views[1], raw, code, "sxkicxat")
+			sendFail(views[1], raw, code, "sxkicxat " .. serverStream.path)
 		end
 	end)
 end, CONFIG.COOLDOWN_SERVER, "Message Saiki Server", function(key, e)
@@ -1478,7 +1491,7 @@ views.dm = ChatView(thread, function(p)
 			-- tiny "inbox" ping so the other person only needs ONE cheap request to learn about new DMs
 			dbRequest("PUT", "/dminbox/" .. partner .. "/" .. ME, { ts = SV, k = res.name }, dmAuth, DM_FIREBASE_DB)
 		else
-			sendFail(views.dm, raw, code, "sxkidirect")
+			sendFail(views.dm, raw, code, "sxkidirect " .. s.path)
 		end
 	end)
 end, CONFIG.COOLDOWN_DM, "Message", function(key, e)
@@ -1583,7 +1596,8 @@ end
 
 -- once per install: find DM threads that already exist (older script versions had no inbox pings)
 local function discoverLegacy()
-	local ok, data = dbRequest("GET", "/dm", nil, dmAuth, DM_FIREBASE_DB, "shallow=true")
+	local ok, data, _, code = dbRequest("GET", "/dm", nil, dmAuth, DM_FIREBASE_DB, "shallow=true")
+	if not ok and (code == 401 or code == 403) then legacyDone, indexDirty = true, true; return end
 	if not ok or type(data) ~= "table" then return end
 	local count = 0
 	for key in pairs(data) do
@@ -1686,7 +1700,7 @@ do
 		local ok, _, raw, code = fsReq("PUT", "/follows/" .. uid .. "/" .. id, { targetRobloxUserId = tonumber(id),
 			targetUsername = cut(user or name or "", 40), targetDisplayName = cut(name or user or "", 80), createdAt = SV })
 		if not ok then return false, whyFail(code, raw, "follows") end
-		local ok2, _, raw2, code2 = fsReq("PUT", "/followers/" .. id .. "/" .. uid, { ts = SV, rid = ME,
+		local ok2, _, raw2, code2 = fsReq("PUT", "/followers/" .. id .. "/" .. uid, { ts = SV, rid = LP.UserId,
 			un = cut(LP.Name, 40), dn = cut(LP.DisplayName, 80) })
 		if not ok2 then
 			fsReq("DELETE", "/follows/" .. uid .. "/" .. id)
@@ -1870,6 +1884,36 @@ do
 		elseif FS.locked then
 			addEmpty(sc, "Your profile entry belongs to an older login, so your public Following count can't update. Following itself works.", 2, 40)
 		end
+
+		-- progress track (season-pass style): one row per tier, the next tier shows a live progress bar
+		addHeader(sc, "Progress & Rewards", 3, "Tier " .. ROMAN[tier])
+		for i = 1, #CONFIG.TIER_AT do
+			local reached, target = i <= tier, i == tier + 1
+			local row = new("Frame", { Size = UDim2.new(1, 0, 0, 60), BackgroundColor3 = WHITE,
+				BackgroundTransparency = reached and 0.9 or 0.95, LayoutOrder = 3 + i, Parent = sc },
+				{ corner(14), stroke(target and 0.78 or 0.92) })
+			new("TextLabel", { Position = UDim2.fromOffset(12, 10), Size = UDim2.fromOffset(34, 34), BackgroundColor3 = TCOL[i],
+				BackgroundTransparency = reached and 0 or 0.72, Text = ROMAN[i], Font = T.fontB, TextSize = 14,
+				TextColor3 = Color3.fromRGB(14, 16, 24), Parent = row }, { corner(17) })
+			new("TextLabel", { Position = UDim2.fromOffset(58, 9), Size = UDim2.new(1, -170, 0, 18), BackgroundTransparency = 1,
+				Text = "Tier " .. ROMAN[i] .. (i == 1 and "  ·  start" or ("  ·  " .. CONFIG.TIER_AT[i] .. " followers")),
+				Font = T.fontB, TextSize = 13, TextColor3 = reached and T.text or T.mut, TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd, Parent = row })
+			local rw = CONFIG.TIER_REWARDS and CONFIG.TIER_REWARDS[i]
+			new("TextLabel", { Position = UDim2.fromOffset(58, 28), Size = UDim2.new(1, -70, 0, 16), BackgroundTransparency = 1,
+				Text = (rw and #rw > 0) and table.concat(rw, "  •  ") or "Starting tier", Font = T.font, TextSize = 12,
+				TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row })
+			new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10), Size = UDim2.fromOffset(100, 16),
+				BackgroundTransparency = 1, Text = reached and "UNLOCKED" or (target and (cnt .. "/" .. CONFIG.TIER_AT[i]) or "LOCKED"),
+				Font = T.fontB, TextSize = 11, TextColor3 = reached and TCOL[i] or T.mut, TextXAlignment = Enum.TextXAlignment.Right,
+				Parent = row })
+			if target then
+				local tb = new("Frame", { Position = UDim2.new(0, 58, 0, 51), Size = UDim2.new(1, -70, 0, 4), BackgroundColor3 = WHITE,
+					BackgroundTransparency = 0.88, Parent = row }, { corner(2) })
+				new("Frame", { Size = UDim2.fromScale(pct, 1), BackgroundColor3 = WHITE, Parent = tb }, { corner(2), grad(0) })
+			end
+		end
+		addEmpty(sc, "Rewards go live in a later update.", 9, 26)
 
 		addHeader(sc, "Following", 10, tostring(nFollowing))
 		local fl = {}
