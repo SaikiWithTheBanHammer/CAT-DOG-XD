@@ -1228,16 +1228,33 @@ local function syncDirectory()
 	end
 	dirSync, dirDirty = maxUpd, true
 end
+-- DM rules authorize writes by mapping the Roblox user ID to this project's
+-- anonymous Firebase UID. Register/refresh that mapping before the first send,
+-- rather than relying only on the delayed background profile sync.
+local dmProfileReady = false
+local function ensureDMProfile()
+	if dmProfileReady then return true end
+	if not ensureToken(dmAuth) or not dmAuth.uid then
+		return false, "DM Firebase authentication failed: " .. tostring(dmAuth.err or "missing UID"), 401
+	end
+	local ok, _, raw, code = dbRequest("PUT", "/profiles/" .. ME, {
+		robloxUserId = tonumber(ME),
+		username = cut(LP.Name, 40),
+		displayName = cut(LP.DisplayName, 80),
+		firebaseUid = dmAuth.uid,
+		updatedAt = SV,
+	}, dmAuth, DM_FIREBASE_DB)
+	if ok then
+		dmProfileReady = true
+		return true
+	end
+	return false, raw, code
+end
+
 local function writeMyProfile()
 	dbRequest("PATCH", "/profiles/" .. ME, { dn = LP.DisplayName, un = LP.Name, pfp = 1, age = LP.AccountAge, upd = SV },
 		auth, FIREBASE_DB)
-	-- DM database has its own anonymous Firebase UID and participant profile mapping.
-	if ensureToken(dmAuth) and dmAuth.uid then
-		dbRequest("PATCH", "/profiles/" .. ME, {
-			robloxUserId = tonumber(ME), username = cut(LP.Name, 40),
-			displayName = cut(LP.DisplayName, 80), firebaseUid = dmAuth.uid, updatedAt = SV,
-		}, dmAuth, DM_FIREBASE_DB)
-	end
+	ensureDMProfile()
 end
 local function loadFriends()
 	if os.time() - friendsAt < 21600 and next(friends) then return end
@@ -1505,6 +1522,13 @@ views.dm = ChatView(thread, function(p)
 	end
 	local s, partner = dmStream, dm.partner
 	task.spawn(function()
+		-- Ensure this account is registered in the DM database before sending;
+		-- the database rules require this Firebase-UID-to-Roblox-ID mapping.
+		local profileOK, profileRaw, profileCode = ensureDMProfile()
+		if not profileOK then
+			sendFail(views.dm, profileRaw, profileCode, "sxkidirect /profiles/" .. ME)
+			return
+		end
 		local ok, res, raw, code = dbRequest("POST", s.path, payload(p), dmAuth, DM_FIREBASE_DB)
 		if ok and type(res) == "table" and res.name then
 			if s == dmStream and not s.seen[res.name] then
