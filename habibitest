@@ -9,7 +9,7 @@
 	  - Chat button now sits BELOW Roblox's menu (settings) button
 	  - Uses the original Saiki Firebase databases + anonymous auth
 	  - Stickers: GitHub picker, persistent local cache, sendable in Server + DMs
-	Tabs: Server | DMs | Profile | Settings
+	Tabs: Server | DMs | Profile | Rank | Settings
 	Needs executor functions: request/http_request. Stickers also need
 	writefile/readfile/isfile/getcustomasset (otherwise stickers show as "[sticker]").
 ]]
@@ -797,9 +797,9 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 end
 
 ----------------------------------------------------------------- window + tabs (4 tabs)
-local TABS = { "Server", "DMs", "Profile", "Settings" }
+local TABS = { "Server", "DMs", "Profile", "Rank", "Settings" }
 local NT = #TABS
-local unread = { false, false, false, false }
+local unread = { false, false, false, false, false }
 local cur, isOpen = 1, false
 local closePicker, closeMenu, onShowTab -- forward
 
@@ -1648,6 +1648,7 @@ do
 		return "HTTP " .. tostring(code) .. " at '" .. step .. "'" .. (m and (" (" .. m .. ")") or "")
 	end
 	local function fsReq(method, path, body, extra) return dbRequest(method, path, body, fsAuth, FS_FIREBASE_DB, extra) end
+	FS.req = fsReq
 	local function myUid()
 		if ensureToken(fsAuth) then return fsAuth.uid end
 		return nil
@@ -2323,13 +2324,200 @@ local function Destroy()
 end
 genv.SaikiRechat = { Destroy = Destroy, Toggle = function() setOpen(not isOpen) end }
 
------------------------------------------------------------------ Settings tab (loaded separately, so a problem in it can never stop the chat from loading)
+----------------------------------------------------------------- Rank + Settings tabs (each loaded separately, so a problem in one can never stop the chat from loading)
 ;(function()
-	local ph = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
-	local msg = new("TextLabel", { Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(20, 0), BackgroundTransparency = 1,
-		Text = "Settings are loading...", TextWrapped = true, Font = T.font, TextSize = 13, TextColor3 = T.mut, Parent = ph })
-	pages[4] = ph
-	local SRC = [==[
+	local H = { T = T, gui = gui, win = win, container = container, pages = pages, winScale = winScale, new = new, corner = corner,
+		stroke = stroke, grad = grad, tween = tween, toast = toast, bind = bind, newScroll = newScroll, addHeader = addHeader,
+		addEmpty = addEmpty, clearList = clearList, thumb = thumb, FS = FS, fitScale = fitScale, CONFIG = CONFIG, blur = blur,
+		request = REQUEST, cache = CACHE, me = ME,
+		open = function() return isOpen end,
+		onShow = function(idx, f)
+			local prev = onShowTab
+			onShowTab = function(i)
+				if prev then prev(i) end
+				if i == idx then f() end
+			end
+		end,
+		expose = function(v) if genv.SaikiRechat then genv.SaikiRechat.Settings = v end end }
+	local function plug(idx, label, SRC)
+		local ph = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = container })
+		local msg = new("TextLabel", { Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(20, 0), BackgroundTransparency = 1,
+			Text = label .. " is loading...", TextWrapped = true, Font = T.font, TextSize = 13, TextColor3 = T.mut, Parent = ph })
+		pages[idx] = ph
+		if not loadstring then msg.Text = label .. " needs loadstring, which this executor doesn't support."; return end
+		local fn, cerr = loadstring(SRC)
+		if not fn then
+			warn("[SAIKI RECHAT] " .. label .. " tab failed to compile: " .. tostring(cerr))
+			msg.Text = label .. " failed to load: " .. tostring(cerr):sub(1, 120)
+			return
+		end
+		H.page = ph
+		local ok, err = pcall(fn, H)
+		if not ok then
+			warn("[SAIKI RECHAT] " .. label .. " tab error: " .. tostring(err))
+			msg.Text = label .. " failed to load: " .. tostring(err):sub(1, 120)
+		end
+	end
+	plug(4, "Rank", [==[
+local H = ...
+local T, FS, new, corner, stroke, grad, tween = H.T, H.FS, H.new, H.corner, H.stroke, H.grad, H.tween
+local newScroll, addHeader, addEmpty, clearList, thumb, ME = H.newScroll, H.addHeader, H.addEmpty, H.clearList, H.thumb, H.me
+local Players = game:GetService("Players")
+local WHITE = Color3.new(1, 1, 1)
+local INK2 = Color3.fromRGB(15, 17, 25)
+local METAL = { Color3.fromRGB(255, 203, 64), Color3.fromRGB(205, 213, 230), Color3.fromRGB(214, 132, 72) } -- gold, silver, bronze
+local MAXROWS = 50
+
+local page = H.page
+for _, c in ipairs(page:GetChildren()) do c:Destroy() end
+local sc = newScroll(page)
+
+local board, names = {}, {}
+local stamp, loading, errMsg, lastManual = -1e9, false, nil, -1e9
+local render
+
+local function openP(e)
+	if T.openProfile then T.openProfile(e.id, e.dn, e.un) end
+end
+
+local function makeRow(e, i)
+	local top = i <= 3
+	local tier = FS.tierOf(e.c)
+	local col = top and METAL[i] or FS.TCOL[tier]
+	local h = top and 66 or 54
+	local r = new("TextButton", { Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = top and col or WHITE,
+		BackgroundTransparency = top and 0.86 or 0.94, Text = "", AutoButtonColor = false, LayoutOrder = 10 + i, Parent = sc },
+		{ corner(14) })
+	local st = stroke(top and 0.4 or 0.75)
+	st.Color = col
+	st.Parent = r
+	if not top then
+		new("Frame", { Position = UDim2.fromOffset(0, 12), Size = UDim2.fromOffset(3, h - 24), BackgroundColor3 = col, Parent = r }, { corner(2) })
+	end
+	local bs = top and 38 or 32
+	new("TextLabel", { Position = UDim2.fromOffset(12, (h - bs) / 2), Size = UDim2.fromOffset(bs, bs), BackgroundColor3 = col,
+		BackgroundTransparency = top and 0 or 0.8, Text = top and tostring(i) or ("#" .. i), Font = T.fontB, TextSize = top and 17 or 12,
+		TextColor3 = top and INK2 or col, Parent = r }, { corner(bs / 2) })
+	local ax = 12 + bs + 10
+	local av = new("ImageButton", { Position = UDim2.fromOffset(ax, (h - 38) / 2), Size = UDim2.fromOffset(38, 38), BackgroundColor3 = WHITE,
+		BackgroundTransparency = 0.88, Image = thumb(e.id), AutoButtonColor = false, Parent = r }, { corner(19) })
+	av.Activated:Connect(function() openP(e) end)
+	local nx = ax + 38 + 10
+	new("TextLabel", { Position = UDim2.fromOffset(nx, h / 2 - 17), Size = UDim2.new(1, -(nx + 118), 0, 18), BackgroundTransparency = 1,
+		Text = (e.dn or ("User " .. e.id)) .. (e.id == ME and "  (you)" or ""), Font = T.fontB, TextSize = 14, TextColor3 = T.text,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+	new("TextLabel", { Position = UDim2.fromOffset(nx, h / 2 + 2), Size = UDim2.new(1, -(nx + 118), 0, 15), BackgroundTransparency = 1,
+		Text = (e.un and e.un ~= "") and ("@" .. e.un) or "", Font = T.font, TextSize = 11, TextColor3 = T.mut,
+		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+	new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, h / 2 - 17), Size = UDim2.fromOffset(104, 18),
+		BackgroundTransparency = 1, Text = e.c .. (e.c == 1 and " follower" or " followers"), Font = T.fontB, TextSize = 13, TextColor3 = col,
+		TextXAlignment = Enum.TextXAlignment.Right, Parent = r })
+	new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, h / 2 + 2), Size = UDim2.fromOffset(104, 15),
+		BackgroundTransparency = 1, Text = "Tier " .. FS.ROMAN[tier], Font = T.font, TextSize = 11, TextColor3 = T.mut,
+		TextXAlignment = Enum.TextXAlignment.Right, Parent = r })
+	r.Activated:Connect(function() openP(e) end)
+end
+
+local load
+function render()
+	if not page.Parent then return end
+	local keep = sc.CanvasPosition
+	clearList(sc)
+	addHeader(sc, "Leaderboard", 1, loading and "updating…" or ("top " .. #board))
+
+	-- my own rank
+	local myRank, myC
+	for i, e in ipairs(board) do if e.id == ME then myRank, myC = i, e.c end end
+	local card = new("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, LayoutOrder = 2, Parent = sc },
+		{ corner(14), stroke(0.92) })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -120, 0, 16), BackgroundTransparency = 1, Text = "YOUR RANK",
+		Font = T.fontB, TextSize = 11, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 26), Size = UDim2.new(1, -120, 0, 22), BackgroundTransparency = 1,
+		Text = myRank and ("#" .. myRank .. "  ·  " .. myC .. (myC == 1 and " follower" or " followers")) or "Unranked  ·  get your first follower",
+		Font = T.fontB, TextSize = 15, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = card })
+	local rf = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(78, 30),
+		BackgroundColor3 = WHITE, Text = "Refresh", Font = T.fontB, TextSize = 12, TextColor3 = INK2, AutoButtonColor = false, Parent = card },
+		{ corner(15), grad(20) })
+	rf.Activated:Connect(function()
+		if loading or os.clock() - lastManual < 8 then return end
+		lastManual = os.clock()
+		task.spawn(load)
+	end)
+
+	if errMsg then
+		addEmpty(sc, errMsg, 5, 50)
+	elseif #board == 0 then
+		addEmpty(sc, loading and "Loading leaderboard…" or "Nobody has followers yet.\nOpen a DM and follow someone to start the board!", 5, 50)
+	end
+	for i, e in ipairs(board) do makeRow(e, i) end
+	sc.CanvasPosition = keep
+end
+
+function load()
+	if loading then return end
+	loading = true
+	errMsg = nil
+	render()
+	local ok, data, raw, code = FS.req("GET", "/followers")
+	if not ok then
+		errMsg = "Couldn't load the leaderboard (" .. tostring(code) .. "). Check the sxikiflowsys rules are published."
+		loading = false
+		render()
+		return
+	end
+	local list = {}
+	if type(data) == "table" then
+		for id, ups in pairs(data) do
+			if type(ups) == "table" and tostring(id):match("^%d+$") then
+				local n = 0
+				for _ in pairs(ups) do n = n + 1 end
+				if n > 0 then list[#list + 1] = { id = tostring(id), c = n } end
+			end
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.c ~= b.c then return a.c > b.c end
+		return a.id < b.id
+	end)
+	while #list > MAXROWS do table.remove(list) end
+
+	-- names: /profiles first, Roblox lookup as fallback
+	local pending = #list
+	for _, e in ipairs(list) do
+		task.spawn(function()
+			local nm = names[e.id]
+			if not nm then
+				local okp, pd = FS.req("GET", "/profiles/" .. e.id)
+				if okp and type(pd) == "table" and pd.username then
+					nm = { dn = pd.displayName or pd.username, un = pd.username }
+				else
+					local oku, un = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(e.id)) end)
+					if oku and un then nm = { dn = un, un = un } else nm = { dn = "User " .. e.id, un = "" } end
+				end
+				names[e.id] = nm
+			end
+			e.dn, e.un = nm.dn, nm.un
+			pending = pending - 1
+		end)
+	end
+	local t0 = os.clock()
+	while pending > 0 and os.clock() - t0 < 12 do task.wait(0.1) end
+	for _, e in ipairs(list) do
+		if not e.dn then e.dn, e.un = "User " .. e.id, "" end
+		if FS.cache then FS.cache[e.id] = { c = e.c, t = os.clock() } end
+	end
+	board, stamp, loading = list, os.clock(), false
+	render()
+end
+
+H.onShow(4, function()
+	render()
+	if os.clock() - stamp > 60 and not loading then task.spawn(load) end
+end)
+render()
+]==])
+	plug(5, "Settings", [==[
 local H = ...
 local T, gui, win, container, pages, winScale = H.T, H.gui, H.win, H.container, H.pages, H.winScale
 local new, corner, stroke, grad, tween, toast, bind = H.new, H.corner, H.stroke, H.grad, H.tween, H.toast, H.bind
@@ -2378,7 +2566,7 @@ local function save()
 end
 
 ---------------------------------------------------------------- page + helpers
-local page = pages[4]
+local page = H.page
 for _, c in ipairs(page:GetChildren()) do c:Destroy() end
 local sc = newScroll(page)
 local order = 0
@@ -2704,24 +2892,7 @@ T.anim, T.aura, T.guiMul = V.anim, V.aura, V.guiMul
 if not V.anim then CONFIG.MAX_MESSAGES = 40 end
 if V.theme ~= "Dark" then setTheme(V.theme) end
 H.expose(V)
-]==]
-	if not loadstring then msg.Text = "Settings need loadstring, which this executor doesn't support."; return end
-	local fn, cerr = loadstring(SRC)
-	if not fn then
-		warn("[SAIKI RECHAT] settings tab failed to compile: " .. tostring(cerr))
-		msg.Text = "Settings failed to load: " .. tostring(cerr):sub(1, 120)
-		return
-	end
-	local H = { T = T, gui = gui, win = win, container = container, pages = pages, winScale = winScale, new = new, corner = corner,
-		stroke = stroke, grad = grad, tween = tween, toast = toast, bind = bind, newScroll = newScroll, addHeader = addHeader,
-		fitScale = fitScale, CONFIG = CONFIG, blur = blur, request = REQUEST, cache = CACHE, me = ME,
-		open = function() return isOpen end,
-		expose = function(v) if genv.SaikiRechat then genv.SaikiRechat.Settings = v end end }
-	local ok, err = pcall(fn, H)
-	if not ok then
-		warn("[SAIKI RECHAT] settings tab error: " .. tostring(err))
-		msg.Text = "Settings failed to load: " .. tostring(err):sub(1, 120)
-	end
+]==])
 end)()
 
 ----------------------------------------------------------------- identity guard loop (every ~45s)
