@@ -2391,6 +2391,44 @@ for _, c in ipairs(page:GetChildren()) do c:Destroy() end
 local sc = newScroll(page)
 
 local board, names = {}, {}
+local NAMEFILE = H.cache .. "/ranknames.json"
+local namesDirty = false
+pcall(function()
+	if isfile and readfile and isfile(NAMEFILE) then
+		local d = HttpService:JSONDecode(readfile(NAMEFILE))
+		if type(d) == "table" and type(d.names) == "table" then
+			for id, v in pairs(d.names) do
+				if type(v) == "table" and type(v.d) == "string" and type(v.u) == "string" and os.time() - (tonumber(v.t) or 0) < 604800 then
+					names[id] = { dn = v.d, un = v.u, keep = true }
+				end
+			end
+		end
+	end
+end)
+local function saveNames()
+	if not namesDirty then return end
+	namesDirty = false
+	pcall(function()
+		if not writefile then return end
+		local out = {}
+		for id, v in pairs(names) do
+			if v.keep then out[id] = { d = v.dn, u = v.un, t = v.t or os.time() } end
+		end
+		writefile(NAMEFILE, HttpService:JSONEncode({ names = out }))
+	end)
+end
+local function apiName(id)
+	if not H.request then return nil end
+	local ok, res = pcall(H.request, { Url = "https://users.roblox.com/v1/users/" .. id, Method = "GET" })
+	if ok and type(res) == "table" and res.StatusCode == 200 and res.Body then
+		local okd, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
+		if okd and type(d) == "table" and type(d.name) == "string" then
+			local dn = (type(d.displayName) == "string" and d.displayName ~= "") and d.displayName or d.name
+			return { dn = dn, un = d.name }
+		end
+	end
+	return nil
+end
 local stamp, loading, errMsg, lastManual = -1e9, false, nil, -1e9
 local render
 local full, gen = nil, 0
@@ -2549,13 +2587,28 @@ end
 local function resolve(e)
 	local nm = names[e.id]
 	if not nm then
-		local okp, pd = FS.req("GET", "/profiles/" .. e.id)
-		if okp and type(pd) == "table" and pd.username then
-			nm = { dn = pd.displayName or pd.username, un = pd.username }
-		else
+		local pl = Players:GetPlayerByUserId(tonumber(e.id) or 0)
+		if pl then nm = { dn = pl.DisplayName, un = pl.Name, keep = true, t = os.time() } end
+		if not nm then
+			local okp, pd = FS.req("GET", "/profiles/" .. e.id)
+			if okp and type(pd) == "table" and pd.username then
+				if type(pd.displayName) == "string" and pd.displayName ~= "" and pd.displayName ~= pd.username then
+					nm = { dn = pd.displayName, un = pd.username, keep = true, t = os.time() }
+				else
+					nm = apiName(e.id) -- profile has no separate display name: ask Roblox
+					if nm then nm.keep, nm.t = true, os.time() else nm = { dn = pd.username, un = pd.username } end
+				end
+			end
+		end
+		if not nm then
+			nm = apiName(e.id)
+			if nm then nm.keep, nm.t = true, os.time() end
+		end
+		if not nm then
 			local oku, un = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(e.id)) end)
 			if oku and un then nm = { dn = un, un = un } else nm = { dn = "User " .. e.id, un = "" } end
 		end
+		if nm.keep then namesDirty = true end
 		names[e.id] = nm
 	end
 	e.dn, e.un = nm.dn, nm.un
@@ -2603,6 +2656,7 @@ function showBoard()
 	end
 	if my ~= gen then return end
 	loading, stamp = false, os.clock()
+	saveNames()
 	render()
 end
 
@@ -3312,7 +3366,7 @@ H.bind(RunService.RenderStepped, function(dt)
 end)
 H.bind(Players.PlayerRemoving, function(p) destroyAura(p) end)
 
----------------------------------------------------------------- dev test panel (only for the two developer accounts; type /testingtimebaby in a chat box)
+---------------------------------------------------------------- dev test panel (only for the two developer accounts; type !atp in a chat box)
 local DEVS = { moosman99999 = true, kabir_priv = true }
 if DEVS[string.lower(LP.Name)] then
 	local new, corner, stroke, grad, tween = H.new, H.corner, H.stroke, H.grad, H.tween
@@ -3382,11 +3436,23 @@ if DEVS[string.lower(LP.Name)] then
 			recount()
 		end)
 	end
+	local lastCmd = -1
 	function T.chatCommand(txt)
-		if string.lower(txt) ~= "/testingtimebaby" then return false end
-		if panel then closePanel() else openPanel() end
+		local t = string.lower(tostring(txt)):gsub("^%s+", ""):gsub("%s+$", "")
+		if t ~= "!atp" then return false end
+		if os.clock() - lastCmd > 0.6 then -- debounce (the Roblox chat can report the same message twice)
+			lastCmd = os.clock()
+			if panel then closePanel() else openPanel() end
+		end
 		return true
 	end
+	pcall(function() H.bind(LP.Chatted, function(msg) T.chatCommand(msg) end) end) -- also works from the Roblox chat box
+	pcall(function()
+		H.bind(game:GetService("TextChatService").MessageReceived, function(m)
+			if m.TextSource and m.TextSource.UserId == LP.UserId then T.chatCommand(m.Text) end
+		end)
+	end)
+	warn("[SAIKI RECHAT] aura test panel ready for " .. LP.Name .. ": type !atp in chat")
 	H.onDestroy(function()
 		closePanel()
 		testKinds, testOn = {}, false
