@@ -100,7 +100,6 @@ local function bind(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c; r
 local REQUEST = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
 local JOB = (game.JobId ~= "" and game.JobId) or "studio"
 local SV = { [".sv"] = "timestamp" }
-local SCRIPT_LOAD_MS = DateTime.now().UnixTimestampMillis
 local ME = tostring(LP.UserId)
 
 ----------------------------------------------------------------- theme + helpers
@@ -951,10 +950,15 @@ local function newStream(path, tAuth, base)
 	return { path = path, auth = tAuth, base = base, last = nil, seen = {}, primed = false }
 end
 local function pollStream(s, handler)
-	local extra = s.last and ('orderBy="$key"&startAt="' .. s.last .. '"')
+	-- skipOld streams: the very first poll only remembers the newest message (nothing is drawn),
+	-- so only messages sent after the script loaded ever show up
+	local priming = s.skipOld and not s.primed
+	local extra = priming and 'orderBy="$key"&limitToLast=1'
+		or (s.last and ('orderBy="$key"&startAt="' .. s.last .. '"'))
 		or ('orderBy="$key"&limitToLast=' .. CONFIG.HISTORY)
 	local ok, data = dbRequest("GET", s.path, nil, s.auth, s.base, extra)
 	if not ok then return end
+	if priming and s.primed then priming = false end -- another poll finished priming while this one was in flight
 	if type(data) == "table" then
 		local rows = {}
 		for k, v in pairs(data) do if type(v) == "table" then rows[#rows + 1] = { k = tostring(k), v = v } end end
@@ -963,7 +967,7 @@ local function pollStream(s, handler)
 			if not s.last or it.k > s.last then s.last = it.k end
 			if not s.seen[it.k] then
 				s.seen[it.k] = true
-				handler(it.k, it.v, not s.primed)
+				if not priming then handler(it.k, it.v, not s.primed) end
 			end
 		end
 	end
@@ -1002,8 +1006,48 @@ local function parseMsg(m)
 	return text, stk
 end
 
+-- DM identity: registers "this Roblox id belongs to this DM login" in the DM database (the DM rules check it).
+-- Best effort + retried: if it can't be registered, Firebase's own error shows up when you send.
+do
+	local st = { ok = false, busy = false, retryAt = 0, warned = false }
+	function T.dmId()
+		if st.ok or not REQUEST then return st.ok end
+		if st.busy then
+			local w = 0
+			while st.busy and w < 15 do task.wait(0.1); w = w + 0.1 end
+			return st.ok
+		end
+		if os.clock() < st.retryAt then return false end
+		st.busy = true
+		local good, why = false, nil
+		if ensureToken(dmAuth) and dmAuth.uid then
+			local uid = tostring(dmAuth.uid)
+			local ok1, _, _, c1 = dbRequest("PUT", "/users/" .. ME, '"' .. uid .. '"', dmAuth, DM_FIREBASE_DB)
+			if ok1 then
+				local ok2, _, _, c2 = dbRequest("PUT", "/uidmap/" .. uid, '"' .. ME .. '"', dmAuth, DM_FIREBASE_DB)
+				good = ok2 and true or false
+				if not ok2 then why = "uidmap HTTP " .. tostring(c2) end
+			else
+				why = "users HTTP " .. tostring(c1)
+			end
+		else
+			why = "DM login not ready"
+		end
+		st.ok, st.busy = good, false
+		if not good then
+			st.retryAt = os.clock() + 30
+			if not st.warned then
+				st.warned = true
+				warn("[SAIKI RECHAT] DM identity not registered (" .. tostring(why) .. "). Publish the new sxkidirect rules; if this Roblox id was linked to another DM login, delete /users/" .. ME .. " in the Firebase console.")
+			end
+		end
+		return good
+	end
+end
+
 ----------------------------------------------------------------- tab 1: Saiki Server
 local serverStream = newStream("/servers/" .. enc(JOB) .. "/messages", auth, FIREBASE_DB)
+serverStream.skipOld = true -- main chat: only messages sent after the script loaded
 serverStream.rpath = "/servers/" .. enc(JOB) .. "/reactions"
 
 local function sendReaction(path, tAuth, base, key, emoji)
@@ -1040,21 +1084,14 @@ if not REQUEST then views[1].notice("No HTTP function found: running in local de
 local function serverHandler(key, m, silent)
 	local uid = tonumber(m.uid)
 	if not uid or banned[uid] then return end
-	-- The first poll primes the cursor. Hide only messages that predate this script launch;
-	-- messages sent after launch but before that first poll should still appear.
-	local arrivedAfterLaunch = false
-	if silent then
-		local sentAt = tonumber(m.ts)
-		if not sentAt or sentAt < SCRIPT_LOAD_MS then return end
-		arrivedAfterLaunch = true
-	end
 	local text, stk = parseMsg(m)
 	if not text then return end
 	local p = Players:GetPlayerByUserId(uid)
 	local name = p and p.DisplayName or (type(m.dn) == "string" and m.dn:sub(1, 40)) or "Player"
 	views[1].add({ uid = uid, name = name, text = text, stk = stk, key = key, reply = parseReply(m) })
-	if not silent or arrivedAfterLaunch then markUnread(1, uid) end
+	if not silent then markUnread(1, uid) end
 end
+if REQUEST then task.spawn(function() pollStream(serverStream, serverHandler) end) end -- remember "now", draw nothing old
 
 ----------------------------------------------------------------- tab 2: Saiki DMs
 local DM_DIR = CACHE .. "/dm"
@@ -1073,8 +1110,6 @@ local function writeJson(path, data)
 	pcall(function() if writefile then writefile(path, HttpService:JSONEncode(data)) end end)
 end
 local function pairKey(a, b) return math.min(tonumber(a), tonumber(b)) .. "_" .. math.max(tonumber(a), tonumber(b)) end
-local function pairPath(a, b) return "/dm/" .. math.min(tonumber(a), tonumber(b)) .. "/" .. math.max(tonumber(a), tonumber(b)) .. "/messages" end
-local function pairReactPath(a, b) return "/dmreact/" .. math.min(tonumber(a), tonumber(b)) .. "/" .. math.max(tonumber(a), tonumber(b)) end
 local function ago(ms)
 	if not ms or ms <= 0 then return "" end
 	local d = os.time() - math.floor(ms / 1000)
@@ -1228,33 +1263,9 @@ local function syncDirectory()
 	end
 	dirSync, dirDirty = maxUpd, true
 end
--- DM rules authorize writes by mapping the Roblox user ID to this project's
--- anonymous Firebase UID. Register/refresh that mapping before the first send,
--- rather than relying only on the delayed background profile sync.
-local dmProfileReady = false
-local function ensureDMProfile()
-	if dmProfileReady then return true end
-	if not ensureToken(dmAuth) or not dmAuth.uid then
-		return false, "DM Firebase authentication failed: " .. tostring(dmAuth.err or "missing UID"), 401
-	end
-	local ok, _, raw, code = dbRequest("PUT", "/profiles/" .. ME, {
-		robloxUserId = tonumber(ME),
-		username = cut(LP.Name, 40),
-		displayName = cut(LP.DisplayName, 80),
-		firebaseUid = dmAuth.uid,
-		updatedAt = SV,
-	}, dmAuth, DM_FIREBASE_DB)
-	if ok then
-		dmProfileReady = true
-		return true
-	end
-	return false, raw, code
-end
-
 local function writeMyProfile()
 	dbRequest("PATCH", "/profiles/" .. ME, { dn = LP.DisplayName, un = LP.Name, pfp = 1, age = LP.AccountAge, upd = SV },
 		auth, FIREBASE_DB)
-	ensureDMProfile()
 end
 local function loadFriends()
 	if os.time() - friendsAt < 21600 and next(friends) then return end
@@ -1522,13 +1533,7 @@ views.dm = ChatView(thread, function(p)
 	end
 	local s, partner = dmStream, dm.partner
 	task.spawn(function()
-		-- Ensure this account is registered in the DM database before sending;
-		-- the database rules require this Firebase-UID-to-Roblox-ID mapping.
-		local profileOK, profileRaw, profileCode = ensureDMProfile()
-		if not profileOK then
-			sendFail(views.dm, profileRaw, profileCode, "sxkidirect /profiles/" .. ME)
-			return
-		end
+		T.dmId()
 		local ok, res, raw, code = dbRequest("POST", s.path, payload(p), dmAuth, DM_FIREBASE_DB)
 		if ok and type(res) == "table" and res.name then
 			if s == dmStream and not s.seen[res.name] then
@@ -1566,9 +1571,10 @@ end
 function openThread(id, name, user)
 	if closePicker then closePicker() end
 	dm.partner, dm.name = id, name
+	local pair = pairKey(ME, id)
 	activeConv, activeDirty = loadConv(id), false
-	dmStream = newStream(pairPath(ME, id), dmAuth, DM_FIREBASE_DB)
-	dmStream.rpath = pairReactPath(ME, id)
+	dmStream = newStream("/dm/" .. pair, dmAuth, DM_FIREBASE_DB)
+	dmStream.rpath = "/dmreact/" .. pair
 	views.dm.clear()
 	-- 1) draw what's already on this device (no network)
 	for _, st in ipairs(activeConv) do dmStream.seen[st.k] = true end -- so Firebase's copy is never drawn twice
@@ -1582,7 +1588,7 @@ function openThread(id, name, user)
 	if e.l then e.r = e.l end
 	refreshUnread()
 	-- 2) ask Firebase only for what's newer than the last local message
-	task.spawn(function() pollStream(dmStream, dmHandler) end)
+	task.spawn(function() T.dmId(); pollStream(dmStream, dmHandler) end)
 end
 bind(backBtn.Activated, function()
 	if closePicker then closePicker() end
@@ -1606,7 +1612,7 @@ local function fetchNew(pid, inboxTs)
 	local msgs = loadConv(pid)
 	local lastKey = msgs[#msgs] and msgs[#msgs].k
 	local extra = lastKey and ('orderBy="$key"&startAt="' .. lastKey .. '"') or ('orderBy="$key"&limitToLast=' .. CONFIG.HISTORY)
-	local ok, data = dbRequest("GET", pairPath(ME, pid), nil, dmAuth, DM_FIREBASE_DB, extra)
+	local ok, data = dbRequest("GET", "/dm/" .. pairKey(ME, pid), nil, dmAuth, DM_FIREBASE_DB, extra)
 	if not ok or type(data) ~= "table" then return end
 	local rows = {}
 	for k, v in pairs(data) do if type(v) == "table" then rows[#rows + 1] = { k = tostring(k), v = v } end end
@@ -1628,6 +1634,7 @@ local function fetchNew(pid, inboxTs)
 end
 
 local function pollInbox()
+	T.dmId()
 	local ok, data = dbRequest("GET", "/dminbox/" .. ME, nil, dmAuth, DM_FIREBASE_DB)
 	if not ok or type(data) ~= "table" then return end
 	local work = 0
@@ -1646,8 +1653,28 @@ end
 
 -- once per install: find DM threads that already exist (older script versions had no inbox pings)
 local function discoverLegacy()
-	-- Old flat /dm/<low>_<high> records cannot be enumerated under participant-scoped rules.
-	-- Do not request a root-level shallow read; it would require overly broad access.
+	local ok, data, _, code = dbRequest("GET", "/dm", nil, dmAuth, DM_FIREBASE_DB, "shallow=true")
+	if not ok and (code == 401 or code == 403) then legacyDone, indexDirty = true, true; return end
+	if not ok or type(data) ~= "table" then return end
+	local count = 0
+	for key in pairs(data) do
+		local a, b = tostring(key):match("^(%d+)_(%d+)$")
+		local pid = a and ((a == ME and b) or (b == ME and a))
+		if pid and not index[pid] and count < 25 then
+			count += 1
+			local ok2, msgs = dbRequest("GET", "/dm/" .. enc(key), nil, dmAuth, DM_FIREBASE_DB, 'orderBy="$key"&limitToLast=1')
+			if ok2 and type(msgs) == "table" then
+				for k, v in pairs(msgs) do
+					local st = type(v) == "table" and toStored(tostring(k), v)
+					if st then
+						local e = touchIndex(pid, st)
+						e.r = e.l -- old history starts as "read"
+						resolveName(pid)
+					end
+				end
+			end
+		end
+	end
 	legacyDone, indexDirty = true, true
 	refreshUnread()
 end
@@ -3680,8 +3707,8 @@ H.bind(RunService.RenderStepped, function(dt)
 end)
 H.bind(Players.PlayerRemoving, function(p) destroyAura(p) end)
 
----------------------------------------------------------------- dev test panel (only for the authorized accounts; type !atp in a chat box)
-local DEVS = { moosman99999 = true, kabir_priv = true, yorichii_566 = true }
+---------------------------------------------------------------- dev test panel (only for the two developer accounts; type !atp in a chat box)
+local DEVS = { moosman99999 = true, kabir_priv = true }
 if DEVS[string.lower(LP.Name)] then
 	local new, corner, stroke, grad, tween = H.new, H.corner, H.stroke, H.grad, H.tween
 	local WHITE = Color3.new(1, 1, 1)
