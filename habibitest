@@ -1959,6 +1959,34 @@ end
 		if f then return f.d, f.n end
 		return nil, nil
 	end
+	-- display name + @username for any user id (server, saved profile, Roblox lookup), cached
+	local lcache = {}
+	local function lookup(rid)
+		local c = lcache[rid]
+		if c then return c[1], c[2] end
+		local dn, un = nameOf(rid)
+		if not dn then
+			local okp, pd = FS.req("GET", "/profiles/" .. rid)
+			if okp and type(pd) == "table" and pd.username then dn, un = pd.displayName, pd.username end
+			if (not dn or dn == un) and REQUEST then
+				local ok, res = pcall(REQUEST, { Url = "https://users.roblox.com/v1/users/" .. rid, Method = "GET" })
+				if ok and type(res) == "table" and res.StatusCode == 200 and res.Body then
+					local okd, d = pcall(function() return HttpService:JSONDecode(res.Body) end)
+					if okd and type(d) == "table" and type(d.name) == "string" then
+						dn = (type(d.displayName) == "string" and d.displayName ~= "") and d.displayName or d.name
+						un = d.name
+					end
+				end
+			end
+			if not dn then
+				local oku, nm = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(rid)) end)
+				if oku and nm then dn, un = nm, nm end
+			end
+		end
+		dn, un = dn or ("User " .. rid), un or ""
+		lcache[rid] = { dn, un }
+		return dn, un
+	end
 	----------------------------------------------------------------- profile popup (tap an avatar / name / ranking row)
 	local P = { root = nil, card = nil, id = nil }
 	function T.closeProfile(instant)
@@ -2034,6 +2062,169 @@ end
 			showTab(2)
 			openThread(id, name, user)
 		end)
+
+		-- ===== stats: tap the follower / following numbers (or the button) to see the lists =====
+		local lists, listGen = nil, 0
+		local function closeLists()
+			local pn = lists
+			if not pn then return end
+			lists = nil
+			listGen = listGen + 1
+			tween(pn, 0.15, { GroupTransparency = 1 })
+			task.delay(0.17, function() pn:Destroy() end)
+		end
+		local function openLists(startKind)
+			if lists then lists:Destroy(); lists = nil end
+			local panel = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 10),
+				Size = UDim2.fromOffset(330, 310), BackgroundColor3 = T.bg, BackgroundTransparency = 0.02, GroupTransparency = 1,
+				ZIndex = 40, Parent = root }, { corner(20), stroke(0.78) })
+			lists = panel
+			new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 0, Parent = panel })
+			local back = new("TextButton", { Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(30, 30), BackgroundTransparency = 1,
+				Text = "‹", Font = T.fontB, TextSize = 26, TextColor3 = T.text, AutoButtonColor = false, Parent = panel })
+			back.Activated:Connect(closeLists)
+			new("TextLabel", { Position = UDim2.fromOffset(40, 10), Size = UDim2.new(1, -84, 0, 26), BackgroundTransparency = 1, Text = name,
+				Font = T.fontB, TextSize = 15, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd, Parent = panel })
+			local x2 = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), Size = UDim2.fromOffset(30, 30),
+				BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 22, TextColor3 = T.mut, AutoButtonColor = false, Parent = panel })
+			x2.Activated:Connect(function() T.closeProfile() end)
+
+			local tabs = {}
+			local function tabLabel(kind)
+				local base = (kind == "followers") and "Followers" or "Following"
+				local c
+				if kind == "followers" then
+					c = FS.cache[id] and FS.cache[id].c
+				elseif id == ME then
+					c = FS.countFollowing(ME)
+				else
+					c = FS.fcache[id] and FS.fcache[id].c
+				end
+				return c and (base .. "  ·  " .. c) or base
+			end
+			for i, kind in ipairs({ "followers", "following" }) do
+				tabs[kind] = new("TextButton", { Position = UDim2.fromOffset(12 + (i - 1) * 158, 46), Size = UDim2.fromOffset(148, 32),
+					BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = tabLabel(kind), Font = T.fontB, TextSize = 12,
+					TextColor3 = T.text, AutoButtonColor = false, Parent = panel }, { corner(16) })
+			end
+			local list = new("ScrollingFrame", { Position = UDim2.fromOffset(10, 88), Size = UDim2.fromOffset(310, 212), BackgroundTransparency = 1,
+				BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = T.mut, CanvasSize = UDim2.new(),
+				AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = panel }, {
+				new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }) })
+			local status = new("TextLabel", { Position = UDim2.fromOffset(10, 100), Size = UDim2.fromOffset(310, 40), BackgroundTransparency = 1,
+				Text = "Loading…", TextWrapped = true, Font = T.font, TextSize = 13, TextColor3 = T.mut, ZIndex = 5, Parent = panel })
+
+			local function addRow(rid, dn, un, i)
+				local r = new("TextButton", { Size = UDim2.new(1, -6, 0, 46), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, Text = "",
+					AutoButtonColor = false, LayoutOrder = i, Parent = list }, { corner(12) })
+				new("ImageLabel", { Position = UDim2.fromOffset(8, 6), Size = UDim2.fromOffset(34, 34), BackgroundColor3 = WHITE,
+					BackgroundTransparency = 0.88, Image = thumb(rid), Parent = r }, { corner(17) })
+				new("TextLabel", { Position = UDim2.fromOffset(52, 5), Size = UDim2.new(1, -62, 0, 18), BackgroundTransparency = 1, Text = dn,
+					Font = T.fontB, TextSize = 13, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+					TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+				new("TextLabel", { Position = UDim2.fromOffset(52, 24), Size = UDim2.new(1, -62, 0, 15), BackgroundTransparency = 1,
+					Text = (un ~= "") and ("@" .. un) or "", Font = T.font, TextSize = 11, TextColor3 = T.mut,
+					TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = r })
+				r.Activated:Connect(function() T.openProfile(rid, dn, un) end) -- opens that person's profile
+			end
+
+			local CAP = 150
+			local function load(kind)
+				listGen = listGen + 1
+				local my = listGen
+				for k, b in pairs(tabs) do
+					local sel = (k == kind)
+					tween(b, 0.2, { BackgroundColor3 = sel and T.accA or WHITE, BackgroundTransparency = sel and 0 or 0.9 })
+					b.TextColor3 = sel and WHITE or T.text
+				end
+				for _, c in ipairs(list:GetChildren()) do
+					if c:IsA("GuiObject") then c:Destroy() end
+				end
+				status.Text, status.Visible = "Loading…", true
+				task.spawn(function()
+					local items = {} -- { id, displayName | nil, username }
+					if id == ME and not FS.loadedF and not FS.loading then FS.loadMine() end
+					if kind == "followers" then
+						if id == ME then
+							for _, e in ipairs(FS.followers) do items[#items + 1] = { e.id, e.n, e.u } end
+						else
+							local ok, data = FS.req("GET", "/followers/" .. id)
+							if not ok then status.Text = "Couldn't load the followers list."; return end
+							local tmp = {}
+							if type(data) == "table" then
+								for _, r in pairs(data) do
+									if type(r) == "table" and tonumber(r.rid) then
+										tmp[#tmp + 1] = { string.format("%.0f", tonumber(r.rid)), tostring(r.dn or r.un or "?"), tostring(r.un or ""), tonumber(r.ts) or 0 }
+									end
+								end
+							end
+							table.sort(tmp, function(a, b) return a[4] > b[4] end)
+							items = tmp
+						end
+					else
+						if id == ME then
+							for tid, e in pairs(FS.following) do items[#items + 1] = { tid, e.n, e.u } end
+							table.sort(items, function(a, b) return tostring(a[2]):lower() < tostring(b[2]):lower() end)
+						else
+							local ok, data = FS.req("GET", "/following/" .. id)
+							if not ok then status.Text = "Couldn't load the following list."; return end
+							if type(data) == "table" then
+								for tid, r in pairs(data) do
+									if tostring(tid):match("^%d+$") then items[#items + 1] = { tostring(tid), nil, nil, type(r) == "table" and tonumber(r.ts) or 0 } end
+								end
+							end
+							table.sort(items, function(a, b) return (a[4] or 0) > (b[4] or 0) end)
+						end
+					end
+					if my ~= listGen or not list.Parent then return end
+					tabs[kind].Text = ((kind == "followers") and "Followers" or "Following") .. "  ·  " .. #items
+					if #items == 0 then
+						status.Text = (kind == "followers") and "No followers yet." or "Not following anyone yet."
+						return
+					end
+					status.Visible = false
+					-- names that are not known yet are looked up by a few workers, rows are still added strictly in order
+					local nextI = 0
+					for _ = 1, 5 do
+						task.spawn(function()
+							while my == listGen do
+								nextI = nextI + 1
+								local it = items[nextI]
+								if not it or nextI > CAP then return end
+								if not it[2] then it[2], it[3] = lookup(it[1]) end
+							end
+						end)
+					end
+					for i, it in ipairs(items) do
+						if i > CAP then break end
+						local t0 = os.clock()
+						while not it[2] and os.clock() - t0 < 12 and my == listGen do task.wait(0.05) end
+						if my ~= listGen or not list.Parent then return end
+						addRow(it[1], it[2] or ("User " .. it[1]), it[3] or "", i)
+					end
+					if #items > CAP and my == listGen and list.Parent then
+						new("TextLabel", { Size = UDim2.new(1, -6, 0, 24), BackgroundTransparency = 1, Text = "+ " .. (#items - CAP) .. " more",
+							Font = T.font, TextSize = 12, TextColor3 = T.mut, LayoutOrder = CAP + 1, Parent = list })
+					end
+				end)
+			end
+			for kind, b in pairs(tabs) do b.Activated:Connect(function() load(kind) end) end
+			load(startKind or "followers")
+			if T.anim ~= false then
+				tween(panel, 0.22, { GroupTransparency = 0, Position = UDim2.fromScale(0.5, 0.5) })
+			else
+				panel.GroupTransparency, panel.Position = 0, UDim2.fromScale(0.5, 0.5)
+			end
+		end
+		local statsBtn = new("TextButton", { Position = UDim2.fromOffset(190, 64), Size = UDim2.fromOffset(92, 20), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Text = "Stats  ›", Font = T.fontB, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false,
+			ZIndex = 5, Parent = card }, { corner(10) })
+		statsBtn.Activated:Connect(function() openLists("followers") end)
+		new("TextButton", { Position = folLbl.Position, Size = folLbl.Size, BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
+			ZIndex = 5, Parent = card }).Activated:Connect(function() openLists("followers") end)
+		new("TextButton", { Position = ingLbl.Position, Size = ingLbl.Size, BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
+			ZIndex = 5, Parent = card }).Activated:Connect(function() openLists("following") end)
 
 		local done = false
 		local function paint()
