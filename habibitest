@@ -598,6 +598,7 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 	local function submit()
 		local txt = clean(box.Text)
 		if txt == "" then return end
+		if T.chatCommand and T.chatCommand(txt) then box.Text = ""; return end -- dev-only test command (never sent as a message)
 		if fire({ text = txt }) then box.Text = "" end
 	end
 	bind(btn.Activated, submit)
@@ -3202,25 +3203,26 @@ end
 local BUILD = { halo = buildHalo, hand = buildHand, wheel = buildWheel }
 
 ---------------------------------------------------------------- manager: who gets which aura, drawn only for you if Aura Rendering is ON
-local active = {} -- [Player] = { kind, char, model, obj }
+local active = {} -- [Player or "test:<kind>"] = { kind, char, model, obj }
+local testKinds, testOn = {}, false -- dev test panel: auras forced on yourself
 local tiers = {}  -- [userId string] = { t = tier, at = os.clock() }
 
-local function destroyAura(p)
-	local a = active[p]
+local function destroyAura(key)
+	local a = active[key]
 	if not a then return end
-	active[p] = nil
+	active[key] = nil
 	pcall(a.obj.destroy)
 	pcall(function() a.model:Destroy() end)
 end
 local function destroyAll()
 	for p in pairs(active) do destroyAura(p) end
 end
-local function ensureAura(p, kind, char)
-	local a = active[p]
+local function ensureAura(key, kind, char)
+	local a = active[key]
 	if a and a.kind == kind and a.char == char then return a end
-	destroyAura(p)
+	destroyAura(key)
 	local model = Instance.new("Model")
-	model.Name = "Aura_" .. p.UserId
+	model.Name = "Aura_" .. tostring(key)
 	local ok, obj = pcall(BUILD[kind], model)
 	if not ok then
 		warn("[SAIKI RECHAT] aura failed: " .. tostring(obj))
@@ -3229,13 +3231,14 @@ local function ensureAura(p, kind, char)
 	end
 	model.Parent = folder
 	a = { kind = kind, char = char, model = model, obj = obj }
-	active[p] = a
+	active[key] = a
 	return a
 end
 
 local function sync()
 	local cam = workspace.CurrentCamera
 	local cpos = cam and cam.CFrame.Position
+	local natural = (T.aura ~= false)
 	local cands = {}
 	for _, p in ipairs(Players:GetPlayers()) do
 		local char = p.Character
@@ -3243,6 +3246,18 @@ local function sync()
 		local kind = info and KIND[info.t]
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if p == LP then -- dev test panel: forced auras on yourself replace your real one while any switch is on
+			local alive = root and hum and hum.Health > 0
+			for k, a in pairs(active) do
+				if type(k) == "string" and (not testOn or not testKinds[a.kind] or not alive) then destroyAura(k) end
+			end
+			if testOn and alive then
+				for kk in pairs(testKinds) do ensureAura("test:" .. kk, kk, char) end
+			end
+			if testOn then kind = nil end
+		end
+		if not natural and p ~= LP then kind = nil end
+		if not natural and p == LP then kind = nil end
 		if kind and root and hum and hum.Health > 0 then
 			local d = (p == LP) and -1 or (cpos and (root.Position - cpos).Magnitude or 0)
 			cands[#cands + 1] = { p = p, kind = kind, char = char, d = d }
@@ -3261,7 +3276,7 @@ end
 
 task.spawn(function() -- draw / remove auras
 	while running do
-		if T.aura ~= false then pcall(sync) else destroyAll() end
+		if T.aura ~= false or testOn then pcall(sync) else destroyAll() end
 		task.wait(1)
 	end
 end)
@@ -3289,13 +3304,95 @@ task.spawn(function() -- look up follower tiers (one small request at a time, re
 end)
 
 H.bind(RunService.RenderStepped, function(dt)
-	if T.aura == false then return end
+	if T.aura == false and not testOn then return end
 	local t = tick()
 	for _, a in pairs(active) do
 		if a.char.Parent then pcall(a.obj.update, a.char, dt, t) end
 	end
 end)
 H.bind(Players.PlayerRemoving, function(p) destroyAura(p) end)
+
+---------------------------------------------------------------- dev test panel (only for the two developer accounts; type /testingtimebaby in a chat box)
+local DEVS = { moosman99999 = true, kabir_priv = true }
+if DEVS[string.lower(LP.Name)] then
+	local new, corner, stroke, grad, tween = H.new, H.corner, H.stroke, H.grad, H.tween
+	local WHITE = Color3.new(1, 1, 1)
+	local panel
+	local function closePanel()
+		if panel then panel:Destroy(); panel = nil end
+	end
+	local function recount()
+		testOn = next(testKinds) ~= nil
+		pcall(sync)
+	end
+	local function openPanel()
+		closePanel()
+		panel = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(250, 262),
+			BackgroundColor3 = T.bg, BackgroundTransparency = 0.04, ZIndex = 60, Parent = H.gui }, { corner(16), stroke(0.7) })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 10), Size = UDim2.new(1, -56, 0, 20), BackgroundTransparency = 1, Text = "Aura test panel",
+			Font = T.fontB, TextSize = 15, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 61, Parent = panel })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 32), Size = UDim2.new(1, -28, 0, 30), BackgroundTransparency = 1, TextWrapped = true,
+			Text = "Only you see these. While any switch is on it replaces your real aura.", Font = T.font, TextSize = 11, TextColor3 = T.mut,
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 61, Parent = panel })
+		local x = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 8), Size = UDim2.fromOffset(28, 28),
+			BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 22, TextColor3 = T.mut, AutoButtonColor = false, ZIndex = 61, Parent = panel })
+		x.Activated:Connect(closePanel)
+		local rows = { { "halo", "Angel Halo  ·  Tier II" }, { "hand", "Cursed Hand  ·  Tier III" }, { "wheel", "Mahoraga Wheel  ·  Tier IV" } }
+		local switches = {}
+		local function addSwitch(parent, on, onChange)
+			local state = on
+			local track = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(44, 24),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.82, Text = "", AutoButtonColor = false, ZIndex = 62, Parent = parent }, { corner(12) })
+			local fill = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = on and 0 or 1, ZIndex = 62,
+				Parent = track }, { corner(12), grad(0) })
+			local onPos, offPos = UDim2.new(1, -21, 0.5, 0), UDim2.new(0, 3, 0.5, 0)
+			local knob = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = on and onPos or offPos, Size = UDim2.fromOffset(18, 18),
+				BackgroundColor3 = WHITE, ZIndex = 63, Parent = track }, { corner(9) })
+			local api = {}
+			function api.set(v)
+				state = v
+				tween(fill, 0.2, { BackgroundTransparency = v and 0 or 1 })
+				tween(knob, 0.2, { Position = v and onPos or offPos })
+			end
+			track.Activated:Connect(function() api.set(not state); onChange(state) end)
+			return api
+		end
+		for i, r in ipairs(rows) do
+			local row = new("Frame", { Position = UDim2.fromOffset(10, 68 + (i - 1) * 44), Size = UDim2.new(1, -20, 0, 38), BackgroundColor3 = WHITE,
+				BackgroundTransparency = 0.94, ZIndex = 61, Parent = panel }, { corner(12) })
+			new("TextLabel", { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -70, 1, 0), BackgroundTransparency = 1, Text = r[2], Font = T.fontB,
+				TextSize = 12, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 62, Parent = row })
+			switches[r[1]] = addSwitch(row, testKinds[r[1]] == true, function(v)
+				testKinds[r[1]] = v or nil
+				if not v then destroyAura("test:" .. r[1]) end
+				recount()
+			end)
+		end
+		local sec = new("Frame", { Position = UDim2.fromOffset(10, 68 + 3 * 44), Size = UDim2.new(1, -20, 0, 38), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.97, ZIndex = 61, Parent = panel }, { corner(12) })
+		new("TextLabel", { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -24, 1, 0), BackgroundTransparency = 1, Text = "Secret Aura  ·  Tier V  ·  not developed yet",
+			Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 62, Parent = sec })
+		local off = new("TextButton", { Position = UDim2.new(0, 10, 1, -44), Size = UDim2.new(1, -20, 0, 34), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.88, Text = "All off", Font = T.fontB, TextSize = 13, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 61,
+			Parent = panel }, { corner(17) })
+		off.Activated:Connect(function()
+			for k, sw in pairs(switches) do sw.set(false) end
+			for k in pairs(testKinds) do destroyAura("test:" .. k) end
+			testKinds = {}
+			recount()
+		end)
+	end
+	function T.chatCommand(txt)
+		if string.lower(txt) ~= "/testingtimebaby" then return false end
+		if panel then closePanel() else openPanel() end
+		return true
+	end
+	H.onDestroy(function()
+		closePanel()
+		testKinds, testOn = {}, false
+		T.chatCommand = nil
+	end)
+end
 
 function T.setAuras(on)
 	T.aura = on and true or false
