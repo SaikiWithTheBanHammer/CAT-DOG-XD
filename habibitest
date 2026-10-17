@@ -2366,7 +2366,19 @@ local Players = game:GetService("Players")
 local WHITE = Color3.new(1, 1, 1)
 local INK2 = Color3.fromRGB(15, 17, 25)
 local METAL = { Color3.fromRGB(255, 203, 64), Color3.fromRGB(205, 213, 230), Color3.fromRGB(214, 132, 72) } -- gold, silver, bronze
-local MAXROWS = 50
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local MINROWS, MAXROWS, STEPROWS = 50, 750, 10
+local LIMIT = MINROWS
+local LIMFILE = H.cache .. "/rankcount_" .. tostring(ME) .. ".json"
+pcall(function()
+	if isfile and readfile and isfile(LIMFILE) then
+		local d = HttpService:JSONDecode(readfile(LIMFILE))
+		if type(d) == "table" and type(d.n) == "number" then
+			LIMIT = math.clamp(math.floor(d.n / STEPROWS + 0.5) * STEPROWS, MINROWS, MAXROWS)
+		end
+	end
+end)
 
 local page = H.page
 for _, c in ipairs(page:GetChildren()) do c:Destroy() end
@@ -2375,6 +2387,13 @@ local sc = newScroll(page)
 local board, names = {}, {}
 local stamp, loading, errMsg, lastManual = -1e9, false, nil, -1e9
 local render
+local full, gen = nil, 0
+local myRank, myC
+local hdrRight
+local dragging, pendVal = false, LIMIT
+local sBar, sFill, sKnob, sVal
+local showBoard
+local load
 
 local function openP(e)
 	if T.openProfile then T.openProfile(e.id, e.dn, e.un) end
@@ -2418,16 +2437,57 @@ local function makeRow(e, i)
 	r.Activated:Connect(function() openP(e) end)
 end
 
-local load
+local function sliderShow(v)
+	if not (sBar and sBar.Parent) then return end
+	local f = (v - MINROWS) / (MAXROWS - MINROWS)
+	sFill.Size = UDim2.fromScale(f, 1)
+	sKnob.Position = UDim2.fromScale(f, 0.5)
+	sVal.Text = "Top " .. v
+end
+
+local function sliderFromX(x)
+	if not (sBar and sBar.Parent) then return end
+	local f = math.clamp((x - sBar.AbsolutePosition.X) / math.max(1, sBar.AbsoluteSize.X), 0, 1)
+	local v = math.floor((MINROWS + f * (MAXROWS - MINROWS)) / STEPROWS + 0.5) * STEPROWS
+	pendVal = math.clamp(v, MINROWS, MAXROWS)
+	sliderShow(pendVal)
+end
+
+local function applyLimit()
+	if pendVal == LIMIT then return end
+	LIMIT = pendVal
+	pcall(function() if writefile then writefile(LIMFILE, HttpService:JSONEncode({ n = LIMIT })) end end)
+	if full then
+		task.spawn(showBoard)
+	elseif not loading then
+		task.spawn(load)
+	end
+end
+
+H.bind(UserInputService.InputChanged, function(i)
+	if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+		sliderFromX(i.Position.X)
+	end
+end)
+H.bind(UserInputService.InputEnded, function(i)
+	if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+		dragging = false
+		sc.ScrollingEnabled = true
+		applyLimit()
+	end
+end)
+
 function render()
 	if not page.Parent then return end
 	local keep = sc.CanvasPosition
 	clearList(sc)
 	addHeader(sc, "Leaderboard", 1, loading and "updating…" or ("top " .. #board))
+	hdrRight = nil
+	for _, c in ipairs(sc:GetChildren()) do
+		if c:IsA("TextLabel") and c.LayoutOrder == 1 then hdrRight = c:FindFirstChildOfClass("TextLabel") end
+	end
 
 	-- my own rank
-	local myRank, myC
-	for i, e in ipairs(board) do if e.id == ME then myRank, myC = i, e.c end end
 	local card = new("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, LayoutOrder = 2, Parent = sc },
 		{ corner(14), stroke(0.92) })
 	new("TextLabel", { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -120, 0, 16), BackgroundTransparency = 1, Text = "YOUR RANK",
@@ -2445,6 +2505,31 @@ function render()
 		task.spawn(load)
 	end)
 
+	-- how many top ranks to load (50 to 750)
+	local sCard = new("Frame", { Size = UDim2.new(1, 0, 0, 68), BackgroundColor3 = WHITE, BackgroundTransparency = 0.94, LayoutOrder = 3, Parent = sc },
+		{ corner(14), stroke(0.92) })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 9), Size = UDim2.new(1, -110, 0, 16), BackgroundTransparency = 1,
+		Text = "RANKS TO LOAD  ·  " .. MINROWS .. " TO " .. MAXROWS, Font = T.fontB, TextSize = 11, TextColor3 = T.mut,
+		TextXAlignment = Enum.TextXAlignment.Left, Parent = sCard })
+	sVal = new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 8), Size = UDim2.fromOffset(90, 18),
+		BackgroundTransparency = 1, Text = "Top " .. pendVal, Font = T.fontB, TextSize = 13, TextColor3 = T.text,
+		TextXAlignment = Enum.TextXAlignment.Right, Parent = sCard })
+	local hit = new("TextButton", { Position = UDim2.fromOffset(14, 32), Size = UDim2.new(1, -28, 0, 26), BackgroundTransparency = 1,
+		Text = "", AutoButtonColor = false, Parent = sCard })
+	sBar = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Size = UDim2.new(1, 0, 0, 6),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.86, Parent = hit }, { corner(3) })
+	sFill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, Parent = sBar }, { corner(3), grad(0) })
+	sKnob = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(18, 18),
+		BackgroundColor3 = WHITE, ZIndex = 2, Parent = sBar }, { corner(9), stroke(0.6) })
+	sliderShow(pendVal)
+	hit.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			sc.ScrollingEnabled = false
+			sliderFromX(i.Position.X)
+		end
+	end)
+
 	if errMsg then
 		addEmpty(sc, errMsg, 5, 50)
 	elseif #board == 0 then
@@ -2452,6 +2537,67 @@ function render()
 	end
 	for i, e in ipairs(board) do makeRow(e, i) end
 	sc.CanvasPosition = keep
+end
+
+-- names: /profiles first, Roblox lookup as fallback
+local function resolve(e)
+	local nm = names[e.id]
+	if not nm then
+		local okp, pd = FS.req("GET", "/profiles/" .. e.id)
+		if okp and type(pd) == "table" and pd.username then
+			nm = { dn = pd.displayName or pd.username, un = pd.username }
+		else
+			local oku, un = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(e.id)) end)
+			if oku and un then nm = { dn = un, un = un } else nm = { dn = "User " .. e.id, un = "" } end
+		end
+		names[e.id] = nm
+	end
+	e.dn, e.un = nm.dn, nm.un
+end
+
+-- takes the top LIMIT of the sorted list and fills the rows in one by one, #1 first
+function showBoard()
+	if not full then return end
+	gen = gen + 1
+	local my = gen
+	local list = {}
+	for i = 1, math.min(LIMIT, #full) do list[i] = { id = full[i].id, c = full[i].c } end
+	board, myRank, myC = {}, nil, nil
+	for i, e in ipairs(list) do if e.id == ME then myRank, myC = i, e.c end end
+	pendVal = LIMIT
+	loading = true
+	render()
+
+	-- a few workers look names up in rank order, the rows are then added strictly top to bottom
+	local nextI = 0
+	local function worker()
+		while my == gen do
+			nextI = nextI + 1
+			local e = list[nextI]
+			if not e then return end
+			resolve(e)
+		end
+	end
+	for _ = 1, 6 do task.spawn(worker) end
+
+	for i, e in ipairs(list) do
+		local t0 = os.clock()
+		while not e.dn and os.clock() - t0 < 12 and my == gen do task.wait(0.05) end
+		if my ~= gen then return end
+		if not e.dn then e.dn, e.un = "User " .. e.id, "" end
+		if FS.cache then FS.cache[e.id] = { c = e.c, t = os.clock() } end
+		if i == 1 then
+			for _, c in ipairs(sc:GetChildren()) do
+				if c:IsA("GuiObject") and c.LayoutOrder == 5 then c:Destroy() end
+			end
+		end
+		board[i] = e
+		makeRow(e, i)
+		if hdrRight and hdrRight.Parent then hdrRight.Text = "loading " .. i .. "/" .. #list end
+	end
+	if my ~= gen then return end
+	loading, stamp = false, os.clock()
+	render()
 end
 
 function load()
@@ -2480,35 +2626,8 @@ function load()
 		if a.c ~= b.c then return a.c > b.c end
 		return a.id < b.id
 	end)
-	while #list > MAXROWS do table.remove(list) end
-
-	-- names: /profiles first, Roblox lookup as fallback
-	local pending = #list
-	for _, e in ipairs(list) do
-		task.spawn(function()
-			local nm = names[e.id]
-			if not nm then
-				local okp, pd = FS.req("GET", "/profiles/" .. e.id)
-				if okp and type(pd) == "table" and pd.username then
-					nm = { dn = pd.displayName or pd.username, un = pd.username }
-				else
-					local oku, un = pcall(function() return Players:GetNameFromUserIdAsync(tonumber(e.id)) end)
-					if oku and un then nm = { dn = un, un = un } else nm = { dn = "User " .. e.id, un = "" } end
-				end
-				names[e.id] = nm
-			end
-			e.dn, e.un = nm.dn, nm.un
-			pending = pending - 1
-		end)
-	end
-	local t0 = os.clock()
-	while pending > 0 and os.clock() - t0 < 12 do task.wait(0.1) end
-	for _, e in ipairs(list) do
-		if not e.dn then e.dn, e.un = "User " .. e.id, "" end
-		if FS.cache then FS.cache[e.id] = { c = e.c, t = os.clock() } end
-	end
-	board, stamp, loading = list, os.clock(), false
-	render()
+	full = list
+	showBoard()
 end
 
 H.onShow(4, function()
