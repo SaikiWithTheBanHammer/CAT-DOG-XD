@@ -59,12 +59,14 @@ local CONFIG = {
 	DM_SHOW = 60,             -- messages drawn when a DM opens (older stay on disk)
 	STICKER_LIST_TTL = 86400, -- seconds before re-checking GitHub for new stickers
 	TIER_AT = { 0, 30, 60, 90, 120 }, -- followers needed for Tier I, II, III, IV, V (edit freely)
-	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras are live; titles + announcements are not yet)
+	TITLES = { "", "Rising Star", "Trendsetter", "Icon", "Legend" }, -- shown next to the name in chat, one per tier (edit freely, "" = none)
+	TOP_RANK_TAG = 50,                -- players in the top N get a #topN tag next to their name in chat
+	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras + titles are live; announcements are not yet)
 		{},
-		{ "Title 1", "Angel Halo aura" },
-		{ "Title 2", "Cursed Hand aura" },
-		{ "Title 3", "Mahoraga Wheel aura" },
-		{ "Title 4", "Secret Aura", "Announcement command" },
+		{ "Rising Star", "Angel Halo aura" },
+		{ "Trendsetter", "Cursed Hand aura" },
+		{ "Icon", "Mahoraga Wheel aura" },
+		{ "Legend", "Secret Aura", "Announcement command" },
 	},
 	-- security
 	IDENTITY_INTERVAL = 45,   -- seconds between identity checks
@@ -98,6 +100,7 @@ local function bind(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c; r
 local REQUEST = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
 local JOB = (game.JobId ~= "" and game.JobId) or "studio"
 local SV = { [".sv"] = "timestamp" }
+local SCRIPT_LOAD_MS = DateTime.now().UnixTimestampMillis
 local ME = tostring(LP.UserId)
 
 ----------------------------------------------------------------- theme + helpers
@@ -706,9 +709,15 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 				HorizontalAlignment = mine and Enum.HorizontalAlignment.Right or Enum.HorizontalAlignment.Left }),
 		})
 		if newGroup and not mine then
+			local nameRow = new("Frame", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
+				LayoutOrder = 1, Parent = col }, {
+				new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder,
+					VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 5) }),
+			})
 			local nameBtn = new("TextButton", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1,
-				Text = m.name, Font = T.fontB, TextSize = 12, TextColor3 = T.mut, LayoutOrder = 1, AutoButtonColor = false, Parent = col },
+				Text = m.name, Font = T.fontB, TextSize = 12, TextColor3 = T.mut, LayoutOrder = 1, AutoButtonColor = false, Parent = nameRow },
 				{ new("UIPadding", { PaddingLeft = UDim.new(0, 4) }) })
+			if T.decorateName then pcall(T.decorateName, nameRow, tostring(m.uid)) end -- title + #top rank tags (added by the follower system)
 			nameBtn.Activated:Connect(function() if T.openProfile then T.openProfile(tostring(m.uid), m.name) end end)
 		end
 
@@ -1031,12 +1040,20 @@ if not REQUEST then views[1].notice("No HTTP function found: running in local de
 local function serverHandler(key, m, silent)
 	local uid = tonumber(m.uid)
 	if not uid or banned[uid] then return end
+	-- The first poll primes the cursor. Hide only messages that predate this script launch;
+	-- messages sent after launch but before that first poll should still appear.
+	local arrivedAfterLaunch = false
+	if silent then
+		local sentAt = tonumber(m.ts)
+		if not sentAt or sentAt < SCRIPT_LOAD_MS then return end
+		arrivedAfterLaunch = true
+	end
 	local text, stk = parseMsg(m)
 	if not text then return end
 	local p = Players:GetPlayerByUserId(uid)
 	local name = p and p.DisplayName or (type(m.dn) == "string" and m.dn:sub(1, 40)) or "Player"
 	views[1].add({ uid = uid, name = name, text = text, stk = stk, key = key, reply = parseReply(m) })
-	if not silent then markUnread(1, uid) end
+	if not silent or arrivedAfterLaunch then markUnread(1, uid) end
 end
 
 ----------------------------------------------------------------- tab 2: Saiki DMs
@@ -1056,6 +1073,8 @@ local function writeJson(path, data)
 	pcall(function() if writefile then writefile(path, HttpService:JSONEncode(data)) end end)
 end
 local function pairKey(a, b) return math.min(tonumber(a), tonumber(b)) .. "_" .. math.max(tonumber(a), tonumber(b)) end
+local function pairPath(a, b) return "/dm/" .. math.min(tonumber(a), tonumber(b)) .. "/" .. math.max(tonumber(a), tonumber(b)) .. "/messages" end
+local function pairReactPath(a, b) return "/dmreact/" .. math.min(tonumber(a), tonumber(b)) .. "/" .. math.max(tonumber(a), tonumber(b)) end
 local function ago(ms)
 	if not ms or ms <= 0 then return "" end
 	local d = os.time() - math.floor(ms / 1000)
@@ -1212,6 +1231,13 @@ end
 local function writeMyProfile()
 	dbRequest("PATCH", "/profiles/" .. ME, { dn = LP.DisplayName, un = LP.Name, pfp = 1, age = LP.AccountAge, upd = SV },
 		auth, FIREBASE_DB)
+	-- DM database has its own anonymous Firebase UID and participant profile mapping.
+	if ensureToken(dmAuth) and dmAuth.uid then
+		dbRequest("PATCH", "/profiles/" .. ME, {
+			robloxUserId = tonumber(ME), username = cut(LP.Name, 40),
+			displayName = cut(LP.DisplayName, 80), firebaseUid = dmAuth.uid, updatedAt = SV,
+		}, dmAuth, DM_FIREBASE_DB)
+	end
 end
 local function loadFriends()
 	if os.time() - friendsAt < 21600 and next(friends) then return end
@@ -1516,10 +1542,9 @@ end
 function openThread(id, name, user)
 	if closePicker then closePicker() end
 	dm.partner, dm.name = id, name
-	local pair = pairKey(ME, id)
 	activeConv, activeDirty = loadConv(id), false
-	dmStream = newStream("/dm/" .. pair, dmAuth, DM_FIREBASE_DB)
-	dmStream.rpath = "/dmreact/" .. pair
+	dmStream = newStream(pairPath(ME, id), dmAuth, DM_FIREBASE_DB)
+	dmStream.rpath = pairReactPath(ME, id)
 	views.dm.clear()
 	-- 1) draw what's already on this device (no network)
 	for _, st in ipairs(activeConv) do dmStream.seen[st.k] = true end -- so Firebase's copy is never drawn twice
@@ -1557,7 +1582,7 @@ local function fetchNew(pid, inboxTs)
 	local msgs = loadConv(pid)
 	local lastKey = msgs[#msgs] and msgs[#msgs].k
 	local extra = lastKey and ('orderBy="$key"&startAt="' .. lastKey .. '"') or ('orderBy="$key"&limitToLast=' .. CONFIG.HISTORY)
-	local ok, data = dbRequest("GET", "/dm/" .. pairKey(ME, pid), nil, dmAuth, DM_FIREBASE_DB, extra)
+	local ok, data = dbRequest("GET", pairPath(ME, pid), nil, dmAuth, DM_FIREBASE_DB, extra)
 	if not ok or type(data) ~= "table" then return end
 	local rows = {}
 	for k, v in pairs(data) do if type(v) == "table" then rows[#rows + 1] = { k = tostring(k), v = v } end end
@@ -1597,28 +1622,8 @@ end
 
 -- once per install: find DM threads that already exist (older script versions had no inbox pings)
 local function discoverLegacy()
-	local ok, data, _, code = dbRequest("GET", "/dm", nil, dmAuth, DM_FIREBASE_DB, "shallow=true")
-	if not ok and (code == 401 or code == 403) then legacyDone, indexDirty = true, true; return end
-	if not ok or type(data) ~= "table" then return end
-	local count = 0
-	for key in pairs(data) do
-		local a, b = tostring(key):match("^(%d+)_(%d+)$")
-		local pid = a and ((a == ME and b) or (b == ME and a))
-		if pid and not index[pid] and count < 25 then
-			count += 1
-			local ok2, msgs = dbRequest("GET", "/dm/" .. enc(key), nil, dmAuth, DM_FIREBASE_DB, 'orderBy="$key"&limitToLast=1')
-			if ok2 and type(msgs) == "table" then
-				for k, v in pairs(msgs) do
-					local st = type(v) == "table" and toStored(tostring(k), v)
-					if st then
-						local e = touchIndex(pid, st)
-						e.r = e.l -- old history starts as "read"
-						resolveName(pid)
-					end
-				end
-			end
-		end
-	end
+	-- Old flat /dm/<low>_<high> records cannot be enumerated under participant-scoped rules.
+	-- Do not request a root-level shallow read; it would require overly broad access.
 	legacyDone, indexDirty = true, true
 	refreshUnread()
 end
@@ -1915,7 +1920,7 @@ do
 				new("Frame", { Size = UDim2.fromScale(pct, 1), BackgroundColor3 = WHITE, Parent = tb }, { corner(2), grad(0) })
 			end
 		end
-		addEmpty(sc, "Auras are live. Titles and the Announcement command come in a later update.", 9, 40)
+		addEmpty(sc, "Auras and titles are live. The Announcement command comes in a later update.", 9, 40)
 
 		addHeader(sc, "Following", 10, tostring(nFollowing))
 		local fl = {}
@@ -1942,6 +1947,100 @@ do
 		end
 	end
 	FS.render()
+
+	-- ===== chat name tags: tier title + #top rank (one /followers download feeds everyone, shared + cached) =====
+	do
+		local METAL = { Color3.fromRGB(255, 203, 64), Color3.fromRGB(205, 213, 230), Color3.fromRGB(214, 132, 72) } -- gold, silver, bronze
+		local counts, rankOf = {}, {}
+		local bStamp, bBusy = -1e9, false
+		local reg = {} -- { row = nameRow, id = userId, title = label, rank = label }
+
+		local function pill(parent, order, text, col, strong)
+			local l = new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundColor3 = col,
+				BackgroundTransparency = strong and 0.78 or 0.86, Text = text, Font = T.fontB, TextSize = 10, TextColor3 = col,
+				LayoutOrder = order, Parent = parent }, { corner(8), new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6),
+				PaddingTop = UDim.new(0, 1), PaddingBottom = UDim.new(0, 1) }) })
+			return l
+		end
+
+		local function paint(r)
+			local id = r.id
+			local n = counts[id] or 0
+			local tier = FS.tierOf(n)
+			local ttl = CONFIG.TITLES and CONFIG.TITLES[tier] or ""
+			if ttl ~= "" then
+				if not r.title then r.title = pill(r.row, 2, ttl, FS.TCOL[tier], false) end
+				r.title.Text, r.title.TextColor3, r.title.BackgroundColor3 = ttl, FS.TCOL[tier], FS.TCOL[tier]
+			elseif r.title then
+				r.title:Destroy(); r.title = nil
+			end
+			local rk = rankOf[id]
+			if rk then
+				local col = METAL[rk] or T.accB
+				if not r.rank then r.rank = pill(r.row, 3, "", col, true) end
+				r.rank.Text, r.rank.TextColor3, r.rank.BackgroundColor3 = "#top" .. rk, col, col
+			elseif r.rank then
+				r.rank:Destroy(); r.rank = nil
+			end
+		end
+
+		local function repaintAll()
+			local keep = {}
+			for _, r in ipairs(reg) do
+				if r.row and r.row.Parent then
+					pcall(paint, r)
+					keep[#keep + 1] = r
+				end
+			end
+			reg = keep
+		end
+
+		local function loadBoard()
+			if bBusy then return end
+			bBusy = true
+			task.spawn(function()
+				local ok, data = FS.req("GET", "/followers")
+				if ok and type(data) == "table" then
+					local list, c2 = {}, {}
+					for id, ups in pairs(data) do
+						if type(ups) == "table" and tostring(id):match("^%d+$") then
+							local n = 0
+							for _ in pairs(ups) do n = n + 1 end
+							if n > 0 then
+								c2[tostring(id)] = n
+								list[#list + 1] = { id = tostring(id), c = n }
+							end
+						end
+					end
+					table.sort(list, function(a, b)
+						if a.c ~= b.c then return a.c > b.c end
+						return a.id < b.id
+					end)
+					local r2 = {}
+					for i = 1, math.min(CONFIG.TOP_RANK_TAG or 50, #list) do r2[list[i].id] = i end
+					counts, rankOf, bStamp = c2, r2, os.clock()
+					for id, n in pairs(c2) do FS.cache[id] = { c = n, t = os.clock() } end
+				else
+					bStamp = os.clock() - 60 -- failed: try again in ~30s
+				end
+				bBusy = false
+				pcall(repaintAll)
+			end)
+		end
+
+		function T.decorateName(row, id)
+			reg[#reg + 1] = { row = row, id = id }
+			paint(reg[#reg])
+			if os.clock() - bStamp > 90 then loadBoard() end
+		end
+
+		task.spawn(function() -- keep tags fresh while the chat is in use
+			while true do
+				task.wait(30)
+				if #reg > 0 and os.clock() - bStamp > 90 then loadBoard() end
+			end
+		end)
+	end
 end
 
 ----------------------------------------------------------------- V2.6: profile popup (tap an avatar or name)
@@ -3557,8 +3656,8 @@ H.bind(RunService.RenderStepped, function(dt)
 end)
 H.bind(Players.PlayerRemoving, function(p) destroyAura(p) end)
 
----------------------------------------------------------------- dev test panel (only for the two developer accounts; type !atp in a chat box)
-local DEVS = { moosman99999 = true, kabir_priv = true }
+---------------------------------------------------------------- dev test panel (only for the authorized accounts; type !atp in a chat box)
+local DEVS = { moosman99999 = true, kabir_priv = true, yorichii_566 = true }
 if DEVS[string.lower(LP.Name)] then
 	local new, corner, stroke, grad, tween = H.new, H.corner, H.stroke, H.grad, H.tween
 	local WHITE = Color3.new(1, 1, 1)
