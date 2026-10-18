@@ -3912,56 +3912,65 @@ do
 			tween(ch.str, 0.2, { Transparency = sel and 0.35 or 0.92 })
 		end
 	end
-	local function paletteMap(old, new, keys)
-		local map = {}
-		for _, k in ipairs(keys) do
-			if old[k] ~= new[k] then map[#map + 1] = { old[k], new[k] } end
-		end
-		return function(col)
-			for _, p in ipairs(map) do if col == p[1] then return p[2] end end
-			return nil
-		end
+	-- Theme engine (stateless): every colour is looked up by what it IS right now, so it never depends on which theme was
+	-- active before. A colour that belongs to any theme's palette (bg / accA / accB / text / mut) simply becomes the same
+	-- slot of the new theme; white (or a theme's overlay colour) on see-through surfaces becomes the new overlay colour.
+	local function ckey(c) return math.floor(c.R * 255 + 0.5) * 65536 + math.floor(c.G * 255 + 0.5) * 256 + math.floor(c.B * 255 + 0.5) end
+	local WHITEK = 16777215
+	local ROLE, OVSET = {}, {}
+	for _, th in pairs(THEMES) do
+		for _, r in ipairs({ "bg", "accA", "accB", "text", "mut" }) do ROLE[ckey(th[r])] = r end
+		if ckey(th.ov) ~= WHITEK then OVSET[ckey(th.ov)] = true end
 	end
-	local function isAccentFill(o) return o:FindFirstChildOfClass("UIGradient") ~= nil end
-	local function recolor(old, th, instant)
-		local ovOn = (old.ov ~= th.ov)
-		local mBg = paletteMap(old, th, { "bg", "accA", "accB" })
-		local mTx = paletteMap(old, th, { "text", "mut", "accA", "accB" })
-		local mGr = paletteMap(old, th, { "bg", "accA", "accB" })
-		local function ovBg(o)
-			if not ovOn or isAccentFill(o) then return nil end
-			local col = o.BackgroundColor3
-			if old.ov == WHITEC then
-				if col == WHITEC and o.BackgroundTransparency >= 0.5 then return th.ov end
-			elseif col == old.ov then
-				return th.ov
-			end
+	local BG_ROLES = { bg = true, accA = true, accB = true }
+	local TX_ROLES = { text = true, mut = true, accA = true, accB = true }
+	local function hasGrad(o) return o:FindFirstChildOfClass("UIGradient") ~= nil end
+	local function bgRole(o)
+		local k = ckey(o.BackgroundColor3)
+		if k == WHITEK then
+			if o.BackgroundTransparency >= 0.5 and not hasGrad(o) then return "ov" end
 			return nil
 		end
+		if OVSET[k] then return "ov" end
+		local r = ROLE[k]
+		if r and BG_ROLES[r] then return r end
+		return nil
+	end
+	local function inButton(o)
 		local btn = gui:FindFirstChild("SaikiButton") -- the open/close button keeps its own look in every theme
+		return btn ~= nil and (o == btn or o:IsDescendantOf(btn))
+	end
+	local function recolor(th, instant)
 		local entries = {}
-		local function add(o, prop, to) entries[#entries + 1] = { o = o, p = prop, from = o[prop], to = to } end
+		local function add(o, prop, role, allowed)
+			local c = o[prop]
+			local k = ckey(c)
+			local r = role
+			if not r then
+				r = ROLE[k]
+				if not (r and allowed[r]) then return end
+			end
+			local to = th[r]
+			if to and ckey(to) ~= k then entries[#entries + 1] = { o = o, p = prop, from = c, to = to } end
+		end
 		local list = gui:GetDescendants()
 		for i, o in ipairs(list) do
-			if not (btn and (o == btn or o:IsDescendantOf(btn))) then
+			if not inButton(o) then
 				if o:IsA("GuiObject") then
-					local n = ovBg(o) or mBg(o.BackgroundColor3)
-					if n then add(o, "BackgroundColor3", n) end
+					add(o, "BackgroundColor3", bgRole(o), BG_ROLES)
 					if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
-						local t2 = mTx(o.TextColor3)
-						if t2 then add(o, "TextColor3", t2) end
+						add(o, "TextColor3", nil, TX_ROLES)
 					elseif o:IsA("ScrollingFrame") then
-						local s2 = mTx(o.ScrollBarImageColor3)
-						if s2 then add(o, "ScrollBarImageColor3", s2) end
+						add(o, "ScrollBarImageColor3", nil, TX_ROLES)
 					end
 				elseif o:IsA("UIStroke") then
-					if ovOn and o.Color == old.ov then add(o, "Color", th.ov) end
+					local k = ckey(o.Color)
+					if (k == WHITEK or OVSET[k]) and ckey(th.ov) ~= k then entries[#entries + 1] = { o = o, p = "Color", from = o.Color, to = th.ov } end
 				elseif o:IsA("UIGradient") then
 					local kps, to, changed = o.Color.Keypoints, {}, false
-					for k, kp in ipairs(kps) do
-						local n = mGr(kp.Value)
-						if n then changed = true end
-						to[k] = n or kp.Value
+					for n, kp in ipairs(kps) do
+						local r = ROLE[ckey(kp.Value)]
+						if r and BG_ROLES[r] and ckey(th[r]) ~= ckey(kp.Value) then to[n] = th[r]; changed = true else to[n] = kp.Value end
 					end
 					if changed then entries[#entries + 1] = { o = o, seq = true, kps = kps, to = to } end
 				end
@@ -3973,7 +3982,7 @@ do
 				if en.o.Parent then
 					if en.seq then
 						local out = {}
-						for k, kp in ipairs(en.kps) do out[k] = ColorSequenceKeypoint.new(kp.Time, kp.Value:Lerp(en.to[k], e)) end
+						for n, kp in ipairs(en.kps) do out[n] = ColorSequenceKeypoint.new(kp.Time, kp.Value:Lerp(en.to[n], e)) end
 						en.o.Color = ColorSequence.new(out)
 					else
 						en.o[en.p] = en.from:Lerp(en.to, e)
@@ -4000,22 +4009,20 @@ do
 		local th = THEMES[name]
 		if busy or not th then return end
 		busy = true
-		local old = { bg = T.bg, accA = T.accA, accB = T.accB, text = T.text, mut = T.mut, ov = T.ov or WHITEC }
 		T.bg, T.accA, T.accB, T.text, T.mut, T.ov, T.bgT = th.bg, th.accA, th.accB, th.text, th.mut, th.ov, th.bgT
 		task.spawn(function()
-			pcall(recolor, old, th, instant)
+			local ok, err = pcall(recolor, th, instant)
+			if not ok then warn("[SAIKI RECHAT] theme change: " .. tostring(err)) end
 			busy = false
 		end)
 	end
-	-- things created later (new chat messages, popups...) get the theme's overlay colour too
+	-- things created later (new chat messages, popups...) get the theme's overlay colour as soon as they appear
 	H.bind(gui.DescendantAdded, function(o)
-		if T.ov == WHITEC then return end
+		if ckey(T.ov) == WHITEK then return end
 		task.defer(function()
-			if not o.Parent then return end
-			local btn = gui:FindFirstChild("SaikiButton")
-			if btn and (o == btn or o:IsDescendantOf(btn)) then return end
+			if not o.Parent or inButton(o) then return end
 			if o:IsA("GuiObject") then
-				if o.BackgroundColor3 == WHITEC and o.BackgroundTransparency >= 0.5 and not isAccentFill(o) then o.BackgroundColor3 = T.ov end
+				if o.BackgroundColor3 == WHITEC and bgRole(o) == "ov" then o.BackgroundColor3 = T.ov end
 			elseif o:IsA("UIStroke") then
 				if o.Color == WHITEC then o.Color = T.ov end
 			end
