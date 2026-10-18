@@ -64,12 +64,27 @@ local CONFIG = {
 	ANNOUNCE_COOLDOWN = 20,           -- seconds between your own announcements
 	ANNOUNCE_SOUND = 128187340772806, -- plays on everyone's device when an announcement arrives
 	TOP_RANK_TAG = 50,                -- players in the top N get a #topN tag next to their name in chat
-	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras, titles and the !anc command are live)
+	-- avatar frames: transparent PNGs from github.com/SaikiWithTheBanHammer/Frames-XD, drawn over every profile picture.
+	-- w/h = image size, cx/cy = centre of the picture hole, r = hole radius (all in image pixels)
+	FRAMES = {
+		t2     = { file = "t2f.jpg",           w = 494, h = 505, cx = 246.4, cy = 245.6, r = 140.3 }, -- Tier II
+		t3     = { file = "t3f.jpg",           w = 494, h = 505, cx = 244.0, cy = 252.4, r = 134.0 }, -- Tier III
+		t4a    = { file = "t41.jpg",           w = 500, h = 500, cx = 254.1, cy = 239.1, r = 150.8 }, -- Tier IV, frame 1
+		t4b    = { file = "t42.jpg",           w = 500, h = 500, cx = 249.7, cy = 230.2, r = 161.0 }, -- Tier IV, frame 2
+		t5     = { file = "t5f.jpg",           w = 500, h = 500, cx = 249.7, cy = 254.5, r = 133.6 }, -- Tier V
+		rose   = { file = "rose (2).jpg",      w = 500, h = 500, cx = 252.6, cy = 240.9, r = 186.2 }, -- secret: Roses
+		cursed = { file = "cursedFrame.jpg",   w = 500, h = 500, cx = 251.7, cy = 251.8, r = 149.9 }, -- secret: Cursed
+		demon  = { file = "DemonFrame.jpg",    w = 500, h = 500, cx = 253.0, cy = 272.0, r = 164.8 }, -- secret: Demon
+	},
+	TIER_FRAMES = { [2] = "t2", [3] = "t3", [4] = { "t4a", "t4b" }, [5] = "t5" }, -- tier -> frame (a list = the player picks one in Settings)
+	FRAME_USERS = {},                 -- secret frames for specific players: [robloxUserId] = "rose" or "cursed" or "demon"
+	FRAME_FIT = 0.95,                 -- 1 = the frame's hole is exactly as big as the picture; lower = picture tucks a little under the ring
+	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras, titles, frames and the !anc command are live)
 		{},
-		{ "PLUS", "Angel Halo aura" },
-		{ "PRIME", "Cursed Hand aura" },
-		{ "PRESTIGE", "Mahoraga Wheel aura", "Announcement command" },
-		{ "ASCENDANT", "Secret Aura" },
+		{ "PLUS", "Angel Halo aura", "Avatar frame" },
+		{ "PRIME", "Cursed Hand aura", "Avatar frame" },
+		{ "PRESTIGE", "Mahoraga Wheel aura", "Announcements", "2 frames" },
+		{ "ASCENDANT", "Secret Aura", "Avatar frame" },
 	},
 	-- security
 	IDENTITY_INTERVAL = 45,   -- seconds between identity checks
@@ -2089,7 +2104,7 @@ do
 				new("Frame", { Size = UDim2.fromScale(pct, 1), BackgroundColor3 = WHITE, Parent = tb }, { corner(2), grad(0) })
 			end
 		end
-		addEmpty(sc, "Auras, titles and the Announcement command (!anc) are live.", 9, 40)
+		addEmpty(sc, "Auras, titles, avatar frames and the Announcement command (!anc) are live.", 9, 40)
 
 		addHeader(sc, "Following", 10, tostring(nFollowing))
 		local fl = {}
@@ -2218,13 +2233,28 @@ do
 					for i = 1, math.min(CONFIG.TOP_RANK_TAG or 50, #list) do r2[list[i].id] = i end
 					counts, rankOf, bStamp = c2, r2, os.clock()
 					for id, n in pairs(c2) do FS.cache[id] = { c = n, t = os.clock() } end
+					T.boardOk = true
+					-- Tier IV players' own frame pick (1 or 2), kept in the DM database; unreadable = everybody gets frame 1
+					local okc, ch = dbRequest("GET", "/frames", nil, dmAuth, DM_FIREBASE_DB)
+					if okc and type(ch) == "table" then
+						local m = {}
+						for id, v in pairs(ch) do if v == 1 or v == 2 then m[tostring(id)] = v end end
+						local mine = T.frameChoice and T.frameChoice[ME]
+						if mine and not m[ME] then m[ME] = mine end
+						T.frameChoice = m
+					end
 				else
 					bStamp = os.clock() - 60 -- failed: try again in ~30s
 				end
 				bBusy = false
 				pcall(repaintAll)
+				if T.refreshFrames then pcall(T.refreshFrames) end
 			end)
 		end
+
+		function T.boardCount(id) return counts[id] end
+		function T.boardLoaded() return T.boardOk == true end
+		function T.boardNeeded() if os.clock() - bStamp > 90 then loadBoard() end end
 
 		function T.decorateName(row, id)
 			reg[#reg + 1] = { row = row, id = id }
@@ -2235,7 +2265,7 @@ do
 		task.spawn(function() -- keep tags fresh while the chat is in use
 			while true do
 				task.wait(30)
-				if #reg > 0 and os.clock() - bStamp > 90 then loadBoard() end
+				if (#reg > 0 or isOpen) and os.clock() - bStamp > 90 then loadBoard() end
 			end
 		end)
 	end
@@ -2829,6 +2859,113 @@ do
 	end
 end
 
+----------------------------------------------------------------- avatar frames (drawn over every profile picture, in every tab)
+;(function()
+	local assets, loading = {}, {}
+	local reg = setmetatable({}, { __mode = "k" })    -- avatar image -> { uid, img }
+	local hooked = setmetatable({}, { __mode = "k" })
+	ensureFolder(CACHE .. "/frames")
+	T.frameChoice = {}                                 -- [userId] = 1 or 2 (Tier IV pick)
+
+	-- which frame does this user wear right now? (nil = none)
+	function T.frameKeyFor(id)
+		if T.frameTest then return T.frameTest end     -- local test from the aura test panel
+		local n = tonumber(id)
+		local sec = n and CONFIG.FRAME_USERS and CONFIG.FRAME_USERS[n]
+		if sec and CONFIG.FRAMES[sec] then return sec end
+		local cnt = T.boardCount and T.boardCount(id)
+		if cnt == nil then
+			if T.boardLoaded and not T.boardLoaded() and T.boardNeeded then T.boardNeeded() end
+			local c = FS.cache and FS.cache[id]
+			cnt = c and c.c or nil
+			if cnt == nil then return nil end
+		end
+		local k = CONFIG.TIER_FRAMES and CONFIG.TIER_FRAMES[FS.tierOf(cnt)]
+		if type(k) == "table" then return k[T.frameChoice[id] or 1] or k[1] end
+		return k
+	end
+
+	-- the logged-in player picks frame 1 or 2 (Tier IV): saved in the DM database so everyone sees it
+	function T.setFrameChoice(n)
+		if n ~= 1 and n ~= 2 then return false end
+		T.frameChoice[ME] = n
+		if T.refreshFrames then pcall(T.refreshFrames) end
+		if not REQUEST then return true end
+		T.dmId()
+		local ok, _, _, code = dbRequest("PUT", "/frames/" .. ME, tostring(n), dmAuth, DM_FIREBASE_DB)
+		return ok and true or false, code
+	end
+
+	local function startLoad(key)
+		if assets[key] ~= nil or loading[key] then return end
+		local def = CONFIG.FRAMES[key]
+		if not def then return end
+		loading[key] = true
+		task.spawn(function()
+			local url = "https://raw.githubusercontent.com/" .. GITHUB_OWNER .. "/Frames-XD/main/" .. enc(def.file)
+			local path = CACHE .. "/frames/" .. key .. ".png"
+			local a = limited(function() return cachedAsset(url, path) end)
+			loading[key] = nil
+			if a then
+				assets[key] = a
+				if alive and T.refreshFrames then pcall(T.refreshFrames) end
+			else
+				assets[key] = false
+				task.delay(60, function() assets[key] = nil end) -- try again later
+			end
+		end)
+	end
+
+	local function apply(o, rec)
+		local key = T.frameKeyFor(rec.uid)
+		local def = key and CONFIG.FRAMES[key]
+		local a = def and assets[key]
+		if def and a == nil then startLoad(key) end
+		if not a then
+			if rec.img then rec.img:Destroy(); rec.img = nil end
+			return
+		end
+		if not (rec.img and rec.img.Parent == o) then
+			if rec.img then rec.img:Destroy() end
+			rec.img = new("ImageLabel", { Name = "SaikiFrame", BackgroundTransparency = 1, Active = false, Image = "", Parent = o })
+		end
+		local s = (CONFIG.FRAME_FIT or 0.95) / (2 * def.r) -- fraction of the avatar's size per image pixel
+		rec.img.ZIndex = o.ZIndex + 1
+		rec.img.Image = a
+		rec.img.Size = UDim2.fromScale(def.w * s, def.h * s)
+		rec.img.Position = UDim2.fromScale(0.5 - def.cx * s, 0.5 - def.cy * s)
+	end
+
+	function T.refreshFrames()
+		for o, rec in pairs(reg) do
+			if o.Parent then pcall(apply, o, rec) else reg[o] = nil end
+		end
+	end
+
+	-- every Roblox headshot picture anywhere in the window gets its owner's frame (also pictures created later or changed later)
+	local function hook(o)
+		if hooked[o] or o.Name == "SaikiFrame" then return end
+		if not (o:IsA("ImageLabel") or o:IsA("ImageButton")) then return end
+		hooked[o] = true
+		local function check()
+			local id = tostring(o.Image):match("AvatarHeadShot&id=(%d+)")
+			local rec = reg[o]
+			if id then
+				if not rec then rec = { uid = id }; reg[o] = rec end
+				rec.uid = id
+				pcall(apply, o, rec)
+			elseif rec then
+				if rec.img then rec.img:Destroy() end
+				reg[o] = nil
+			end
+		end
+		check()
+		o:GetPropertyChangedSignal("Image"):Connect(check)
+	end
+	bind(gui.DescendantAdded, hook)
+	for _, d in ipairs(gui:GetDescendants()) do hook(d) end
+end)()
+
 ----------------------------------------------------------------- scheduler (one loop for everything)
 task.spawn(function()
 	local n = 0
@@ -3381,6 +3518,46 @@ toggleRow("Notifications",
 		save()
 		toast(v and "Notifications on" or "Notifications off")
 	end)
+
+---------------------------------------------------------------- avatar frame (Tier IV picks one of two)
+header("Avatar Frame")
+do
+	local text = "Tier IV players can wear one of two frames, and everyone sees the one you pick. Tier II, III and V get their frame automatically."
+	local dh = textH(text, 12, TW)
+	local c = card(33 + dh + 10 + 36 + 12)
+	local y = title(c, "Tier IV frame")
+	desc(c, text, y, TW)
+	local row = new("Frame", { Position = UDim2.fromOffset(12, y + dh + 10), Size = UDim2.new(1, -24, 0, 36), BackgroundTransparency = 1, Parent = c })
+	local chips = {}
+	local function paint()
+		local cur = (T.frameChoice and T.frameChoice[H.me]) or 1
+		for n, ch in pairs(chips) do
+			ch.btn.BackgroundTransparency = (n == cur) and 0.8 or 0.94
+			ch.str.Transparency = (n == cur) and 0.35 or 0.92
+		end
+	end
+	for n = 1, 2 do
+		local btn = new("TextButton", { Position = UDim2.new((n - 1) / 2, 0, 0, 0), Size = UDim2.new(0.5, -5, 1, 0), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.94, Text = "Frame " .. n, Font = T.fontB, TextSize = 13, TextColor3 = T.text, AutoButtonColor = false,
+			Parent = row }, { corner(12) })
+		local str = stroke(0.92)
+		str.Parent = btn
+		chips[n] = { btn = btn, str = str }
+		btn.Activated:Connect(function()
+			local FS = H.FS
+			local cnt = T.boardCount and T.boardCount(H.me)
+			if cnt == nil then local cc = FS.cache and FS.cache[H.me]; cnt = cc and cc.c or 0 end
+			if FS.tierOf(cnt) < 4 then toast("Frame choice unlocks at Tier IV"); return end
+			paint()
+			task.spawn(function()
+				local ok = T.setFrameChoice and T.setFrameChoice(n)
+				paint()
+				toast(ok and ("Frame " .. n .. " selected") or "Couldn't save your pick (publish the new DM rules)")
+			end)
+		end)
+	end
+	paint()
+end
 
 ---------------------------------------------------------------- theme
 header("Appearance")
@@ -3938,7 +4115,7 @@ if DEVS[string.lower(LP.Name)] then
 	end
 	local function openPanel()
 		closePanel()
-		panel = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(250, 262),
+		panel = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(250, 414),
 			BackgroundColor3 = T.bg, BackgroundTransparency = 0.04, ZIndex = 60, Parent = H.gui }, { corner(16), stroke(0.7) })
 		new("TextLabel", { Position = UDim2.fromOffset(14, 10), Size = UDim2.new(1, -56, 0, 20), BackgroundTransparency = 1, Text = "Aura test panel",
 			Font = T.fontB, TextSize = 15, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 61, Parent = panel })
@@ -3983,6 +4160,30 @@ if DEVS[string.lower(LP.Name)] then
 			BackgroundTransparency = 0.97, ZIndex = 61, Parent = panel }, { corner(12) })
 		new("TextLabel", { Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -24, 1, 0), BackgroundTransparency = 1, Text = "Secret Aura  ·  Tier V  ·  not developed yet",
 			Font = T.font, TextSize = 12, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 62, Parent = sec })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 68 + 3 * 44 + 46), Size = UDim2.new(1, -28, 0, 16), BackgroundTransparency = 1,
+			Text = "Avatar frame test (only you, on every avatar)", Font = T.fontB, TextSize = 11, TextColor3 = T.mut,
+			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 61, Parent = panel })
+		local fopts = { { false, "Off" }, { "t2", "Tier II" }, { "t3", "Tier III" }, { "t4a", "Tier IV-1" }, { "t4b", "Tier IV-2" },
+			{ "t5", "Tier V" }, { "rose", "Roses" }, { "cursed", "Cursed" }, { "demon", "Demon" } }
+		local fchips = {}
+		local function paintFrames()
+			for _, c in ipairs(fchips) do
+				c.btn.BackgroundTransparency = (c.key == T.frameTest) and 0.7 or 0.92
+			end
+		end
+		for i, o in ipairs(fopts) do
+			local col, rowi = (i - 1) % 3, math.floor((i - 1) / 3)
+			local btn = new("TextButton", { Position = UDim2.fromOffset(10 + col * 76, 68 + 3 * 44 + 66 + rowi * 32), Size = UDim2.fromOffset(72, 28),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.92, Text = o[2], Font = T.fontB, TextSize = 11, TextColor3 = T.text,
+				AutoButtonColor = false, ZIndex = 61, Parent = panel }, { corner(14) })
+			fchips[#fchips + 1] = { btn = btn, key = o[1] or nil }
+			btn.Activated:Connect(function()
+				T.frameTest = o[1] or nil
+				paintFrames()
+				if T.refreshFrames then pcall(T.refreshFrames) end
+			end)
+		end
+		paintFrames()
 		local off = new("TextButton", { Position = UDim2.new(0, 10, 1, -44), Size = UDim2.new(1, -20, 0, 34), BackgroundColor3 = WHITE,
 			BackgroundTransparency = 0.88, Text = "All off", Font = T.fontB, TextSize = 13, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 61,
 			Parent = panel }, { corner(17) })
@@ -3991,6 +4192,9 @@ if DEVS[string.lower(LP.Name)] then
 			for k in pairs(testKinds) do destroyAura("test:" .. k) end
 			testKinds = {}
 			recount()
+			T.frameTest = nil
+			paintFrames()
+			if T.refreshFrames then pcall(T.refreshFrames) end
 		end)
 	end
 	local lastCmd = -1
