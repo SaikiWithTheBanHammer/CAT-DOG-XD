@@ -1054,6 +1054,45 @@ local function setOpen(v)
 end
 bind(chatBtn.Activated, function() setOpen(not isOpen) end)
 
+-- spinning black/white ring around the button + a "tap here" cloud that points at it (gone after the first tap / after 30s)
+;(function()
+	local ring = new("Frame", { Name = "SaikiRing", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(48, 48), BackgroundTransparency = 1, Active = false, Parent = chatBtn }, { corner(24) })
+	local sk = new("UIStroke", { Thickness = 3, Color = Color3.new(1, 1, 1), ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = ring })
+	local g = new("UIGradient", { Rotation = 0, Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.new(1, 1, 1)), ColorSequenceKeypoint.new(0.25, Color3.new(0, 0, 0)),
+		ColorSequenceKeypoint.new(0.5, Color3.new(1, 1, 1)), ColorSequenceKeypoint.new(0.75, Color3.new(0, 0, 0)),
+		ColorSequenceKeypoint.new(1, Color3.new(1, 1, 1)) }), Parent = sk })
+	TweenService:Create(g, TweenInfo.new(2.2, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1), { Rotation = 360 }):Play()
+
+	local hint = new("Frame", { Name = "SaikiHint", AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(1, 16, 0.5, 0),
+		Size = UDim2.fromOffset(196, 52), BackgroundTransparency = 1, Active = false, ZIndex = 20, Parent = chatBtn })
+	local bubble = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(250, 250, 255), Text = "",
+		AutoButtonColor = false, ZIndex = 21, Parent = hint }, { corner(16), stroke(0.1, 2) })
+	new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 1, 0.5, 0), Size = UDim2.fromOffset(16, 16), Rotation = 45,
+		BackgroundColor3 = Color3.fromRGB(250, 250, 255), ZIndex = 20, Parent = hint })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 6), Size = UDim2.new(1, -24, 0, 22), BackgroundTransparency = 1, Text = "Tap this button",
+		Font = T.fontB, TextSize = 15, TextColor3 = Color3.fromRGB(15, 17, 25), TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 22, Parent = bubble })
+	new("TextLabel", { Position = UDim2.fromOffset(14, 27), Size = UDim2.new(1, -24, 0, 18), BackgroundTransparency = 1,
+		Text = "to open / close Saiki Rechat", Font = T.font, TextSize = 12, TextColor3 = Color3.fromRGB(70, 74, 92),
+		TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 22, Parent = bubble })
+	-- the cloud gently nudges toward the button, over and over
+	TweenService:Create(hint, TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		{ Position = UDim2.new(1, 8, 0.5, 0) }):Play()
+
+	local gone = false
+	local function dismiss()
+		if gone then return end
+		gone = true
+		tween(bubble, 0.25, { BackgroundTransparency = 1 })
+		task.delay(0.28, function() hint:Destroy() end)
+	end
+	bind(chatBtn.Activated, dismiss)
+	bubble.Activated:Connect(function() dismiss(); if not isOpen then setOpen(true) end end)
+	bind(win:GetPropertyChangedSignal("Visible"), function() if win.Visible then dismiss() end end)
+	task.delay(30, function() if alive then dismiss() end end)
+end)()
+
 local views = {}
 
 ----------------------------------------------------------------- stream helper
@@ -4415,18 +4454,13 @@ if DEVS[string.lower(LP.Name)] then
 	end
 	local function exportText()
 		local FIT = CONFIG.FRAME_FIT or 0.95
-		local out = {
-			"-- Frames2-Custom measures exported by " .. LP.Name .. "  (FRAME_FIT = " .. FIT .. ")",
-			"-- cx / cy / r are paste-ready: they already include the X / Y / Size adjustments made on the sliders.",
-			"-- 'adjust' shows what was moved: x / y in % of the avatar size, size in %.  (* = this frame was adjusted)",
-		}
+		-- short format: one line per frame = id cx cy r  (final numbers, slider changes already included; * = adjusted)
+		local out = { "Frames2 cx cy r (fit " .. FIT .. ") by " .. LP.Name .. "  * = adjusted" }
 		for _, d in ipairs(CONFIG.FRAMES2 or {}) do
 			local a = adjOf("x_" .. d.id)
 			local s = FIT / (2 * d.r) * a.sz
 			local touched = (a.dx ~= 0 or a.dy ~= 0 or a.sz ~= 1)
-			out[#out + 1] = string.format('x_%s = { file = "%s", repo = "%s", w = %d, h = %d, cx = %.1f, cy = %.1f, r = %.1f }, -- adjust: x %+.1f%% y %+.1f%% size %d%%%s',
-				d.id, d.file, CONFIG.FRAMES2_REPO or "Frames2-Custom", d.w, d.h, d.cx - a.dx / s, d.cy - a.dy / s, d.r / a.sz,
-				a.dx * 100, a.dy * 100, math.floor(a.sz * 100 + 0.5), touched and " *" or "")
+			out[#out + 1] = string.format("%s %.1f %.1f %.1f%s", d.id, d.cx - a.dx / s, d.cy - a.dy / s, d.r / a.sz, touched and " *" or "")
 		end
 		return table.concat(out, "\n")
 	end
