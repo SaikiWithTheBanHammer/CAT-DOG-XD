@@ -186,11 +186,15 @@ local function requestJSON(method, url, body, headers)
 	if headers then for k, v in pairs(headers) do opts.Headers[k] = v end end
 	if body ~= nil then opts.Body = (type(body) == "string") and body or HttpService:JSONEncode(body) end
 	local ok, res = pcall(REQUEST, opts)
-	if not ok or not res then return false, nil, tostring(res) end
+	if not ok or not res then
+		if T.guardFail then pcall(T.guardFail, res) end
+		return false, nil, tostring(res)
+	end
 	local code = tonumber(res.StatusCode or res.Status or 0) or 0
 	local raw = res.Body or res.body or ""
 	local decoded
 	if raw ~= "" then pcall(function() decoded = HttpService:JSONDecode(raw) end) end
+	if T.guardNote then pcall(T.guardNote, code >= 200 and code < 300, code, url) end
 	return code >= 200 and code < 300, decoded, raw, code
 end
 
@@ -877,7 +881,7 @@ local cur, isOpen = 1, false
 local closePicker, closeMenu, onShowTab -- forward
 
 local scrim = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "",
-	AutoButtonColor = false, Visible = false, Parent = gui })
+	AutoButtonColor = false, Active = false, Visible = false, Parent = gui }) -- no longer closes the window or eats taps meant for the game
 local win = new("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
 	Size = UDim2.fromOffset(475, 375), BackgroundColor3 = T.bg, BackgroundTransparency = T.bgT,
 	GroupTransparency = 1, Visible = false, Parent = gui }, {
@@ -1005,7 +1009,6 @@ local function setOpen(v)
 	end
 end
 bind(chatBtn.Activated, function() setOpen(not isOpen) end)
-bind(scrim.Activated, function() setOpen(false) end)
 
 local views = {}
 
@@ -1074,6 +1077,7 @@ end
 -- Best effort + retried: if it can't be registered, Firebase's own error shows up when you send.
 do
 	local st = { ok = false, busy = false, retryAt = 0, warned = false }
+	function T.dmIdReset() st.ok, st.busy, st.retryAt, st.warned = false, false, 0, false end
 	function T.dmId()
 		if st.ok or not REQUEST then return st.ok end
 		if st.busy then
@@ -2858,6 +2862,232 @@ do
 		end)
 	end
 end
+
+----------------------------------------------------------------- conflict guard (Ares / BxD Rechat and anything else that breaks the Firebase calls)
+;(function()
+	local st = { fails = 0, nextAt = 0, scanAt = -1e9, found = {}, lastErr = nil, busy = false }
+	local dlg, statusLbl
+	-- the HTTP functions exactly as they were when Saiki Rechat loaded (used by Repair / Kill)
+	T.origRequest = REQUEST
+	local orig = {}
+	pcall(function() orig.request = genv.request; orig.http_request = genv.http_request end)
+	pcall(function() orig.syn = syn and syn.request or nil end)
+	pcall(function() orig.http = http and http.request or nil end)
+
+	local function roots()
+		local r = {}
+		pcall(function() r[#r + 1] = game:GetService("CoreGui") end)
+		pcall(function() r[#r + 1] = LP:FindFirstChildOfClass("PlayerGui") end)
+		pcall(function() if gethui then r[#r + 1] = gethui() end end)
+		return r
+	end
+	local function isAresGui(inst)
+		if inst == gui then return false end
+		local n = inst.Name:lower()
+		return n:sub(1, 4) == "ares" or n:find("bxd", 1, true) ~= nil
+	end
+	local function scan(force)
+		if not force and os.clock() - st.scanAt < 15 then return st.found end
+		local f = {}
+		if genv._AresAntiSpyInstalled then f[#f + 1] = "Ares anti-spy" end
+		if type(genv.safePost) == "function" or type(genv.safeGet) == "function" then f[#f + 1] = "Ares HTTP helpers" end
+		for _, root in ipairs(roots()) do
+			pcall(function()
+				for _, g in ipairs(root:GetChildren()) do
+					if isAresGui(g) then f[#f + 1] = g.Name end
+				end
+			end)
+		end
+		st.found, st.scanAt = f, os.clock()
+		return f
+	end
+
+	local function setStatus(text, kind)
+		if not (statusLbl and statusLbl.Parent) then return end
+		statusLbl.Text = text
+		statusLbl.TextColor3 = (kind == "ok" and Color3.fromRGB(110, 230, 160)) or (kind == "bad" and T.red) or T.mut
+	end
+	local function hide()
+		if dlg then dlg:Destroy(); dlg = nil; statusLbl = nil end
+	end
+
+	-- a real, logged-in Firebase call (proves transport + login both work)
+	local function authedTest()
+		local ok, _, raw, code = dbRequest("GET", serverStream.path, nil, auth, FIREBASE_DB, 'orderBy="$key"&limitToLast=1')
+		if ok then return true, "Connected" end
+		return false, ((code and code > 0) and ("HTTP " .. tostring(code)) or "no response") .. " " .. tostring(raw):sub(1, 80)
+	end
+	local function relogin(hard)
+		for _, t in ipairs({ auth, dmAuth, fsAuth }) do
+			t.err = nil
+			if hard then t.token, t.exp = nil, 0 end
+			ensureToken(t, true, t.token)
+		end
+	end
+
+	local function doRetry()
+		st.fails = 0
+		local ok, why = authedTest()
+		if ok then return true, "Connected. Saiki Rechat is working again." end
+		relogin(false)
+		ok, why = authedTest()
+		if ok then return true, "Connected after renewing the logins." end
+		return false, "Still failing (" .. why .. "). Try Repair."
+	end
+
+	local function doRepair()
+		st.fails = 0
+		if authedTest() then return true, "Nothing to repair: the connection works." end
+		local cands = {}
+		local function add(name, f)
+			if type(f) ~= "function" then return end
+			for _, c in ipairs(cands) do if c.f == f then return end end
+			cands[#cands + 1] = { n = name, f = f }
+		end
+		add("the function saved at load", T.origRequest)
+		add("request", orig.request); add("http_request", orig.http_request)
+		add("syn.request", orig.syn); add("http.request", orig.http)
+		pcall(function() add("fluxus.request", fluxus and fluxus.request) end)
+		pcall(function() add("request (current)", genv.request) end)
+		local keep = REQUEST
+		for _, c in ipairs(cands) do
+			if c.f ~= keep then
+				REQUEST = c.f
+				relogin(false)
+				if authedTest() then
+					if T.dmIdReset then T.dmIdReset() end
+					return true, "Fixed: Saiki Rechat now uses " .. c.n .. "."
+				end
+			end
+		end
+		REQUEST = keep
+		return false, "No clean request function worked. Close Ares/BxD and run Saiki Rechat again, or use Kill Ares / BxD."
+	end
+
+	local function doKillErrors()
+		st.fails, st.lastErr = 0, nil
+		if T.clearNotifs then T.clearNotifs() end
+		if T.dmIdReset then T.dmIdReset() end
+		relogin(true)
+		local ok, why = authedTest()
+		if ok then
+			pcall(T.dmId)
+			return true, "Errors cleared, logged in again, connection works."
+		end
+		return false, "Errors cleared, but it still fails (" .. why .. "). Try Repair or Kill Ares / BxD."
+	end
+
+	local function doKillAres()
+		local n = 0
+		for _, root in ipairs(roots()) do
+			pcall(function()
+				for _, g in ipairs(root:GetChildren()) do
+					if isAresGui(g) then pcall(function() g:Destroy() end); n = n + 1 end
+				end
+			end)
+		end
+		local hadSpy = genv._AresAntiSpyInstalled
+		for _, k in ipairs({ "_AresAntiSpyInstalled", "safePost", "safeGet" }) do pcall(function() genv[k] = nil end) end
+		if hadSpy then pcall(function() genv.Loaded = nil end) end
+		-- give the HTTP functions back to what they were when Saiki loaded (only the ones somebody replaced since)
+		local restored = 0
+		for _, name in ipairs({ "request", "http_request" }) do
+			if orig[name] and genv[name] ~= orig[name] then pcall(function() genv[name] = orig[name] end); restored = restored + 1 end
+		end
+		pcall(function() if orig.syn and syn.request ~= orig.syn then syn.request = orig.syn; restored = restored + 1 end end)
+		pcall(function() if orig.http and http.request ~= orig.http then http.request = orig.http; restored = restored + 1 end end)
+		st.scanAt, st.fails = -1e9, 0
+		relogin(false)
+		local ok, why = authedTest()
+		local what = "Closed " .. n .. " Ares/BxD window(s), cleared its helpers"
+		if restored > 0 then what = what .. ", restored " .. restored .. " HTTP function(s)" end
+		if ok then
+			if T.dmIdReset then T.dmIdReset() end
+			return true, what .. ". Connection works."
+		end
+		return false, what .. ", but it still fails (" .. why .. "). Its background code may keep running: rejoin without running Ares/BxD."
+	end
+
+	local function run(label, fn)
+		if st.busy then return end
+		st.busy = true
+		setStatus(label .. "...", nil)
+		task.spawn(function()
+			local okc, good, text = pcall(fn)
+			st.busy = false
+			if not okc then good, text = false, "Error: " .. tostring(good) end
+			setStatus(text or (good and "Done" or "Failed"), good and "ok" or "bad")
+			if good then
+				st.fails = 0
+				task.delay(2.5, function() if dlg and not st.busy then hide() end end)
+			end
+		end)
+	end
+
+	local function show()
+		if dlg or not alive then return end
+		local f = scan(true)
+		local parts = {}
+		if #f > 0 then parts[#parts + 1] = "Detected: " .. table.concat(f, ", ") end
+		if st.lastErr then parts[#parts + 1] = "Last error: " .. st.lastErr end
+		if #parts == 0 then parts[1] = "Ares/BxD itself wasn't found, but Firebase requests keep failing." end
+		dlg = new("Frame", { Name = "SaikiConflict", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(380, 306), BackgroundColor3 = T.bg, BackgroundTransparency = 0.03, ZIndex = 300, Parent = gui },
+			{ corner(16), stroke(0.45, 1.5) })
+		local function label(p)
+			p.BackgroundTransparency, p.ZIndex, p.Parent = 1, 301, dlg
+			p.TextXAlignment = Enum.TextXAlignment.Left
+			p.TextYAlignment = Enum.TextYAlignment.Top
+			p.TextWrapped = true
+			return new("TextLabel", p)
+		end
+		label({ Position = UDim2.fromOffset(16, 12), Size = UDim2.new(1, -60, 0, 20), Text = "Conflict detected", Font = T.fontB, TextSize = 16, TextColor3 = T.red })
+		label({ Position = UDim2.fromOffset(16, 40), Size = UDim2.new(1, -32, 0, 78),
+			Text = "Ares/BxD Rechat is heavy and has aggressive anti-restrictions, due to which other scripts don't work properly. Preferably don't run it together with Saiki Rechat or other chat scripts.",
+			Font = T.font, TextSize = 13, TextColor3 = T.text })
+		label({ Position = UDim2.fromOffset(16, 122), Size = UDim2.new(1, -32, 0, 44), Text = table.concat(parts, "\n"):sub(1, 220),
+			Font = T.font, TextSize = 11, TextColor3 = T.mut })
+		statusLbl = label({ Position = UDim2.fromOffset(16, 170), Size = UDim2.new(1, -32, 0, 34), Text = "Pick an option below.", Font = T.fontB, TextSize = 12, TextColor3 = T.mut })
+		local function btn(text, x, y, w, accent, fn)
+			local b = new("TextButton", { Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, 34), BackgroundColor3 = accent or WHITE,
+				BackgroundTransparency = accent and 0.72 or 0.9, Text = text, Font = T.fontB, TextSize = 12, TextColor3 = T.text,
+				AutoButtonColor = false, ZIndex = 301, Parent = dlg }, { corner(12) })
+			b.Activated:Connect(fn)
+		end
+		btn("Retry", 16, 212, 110, nil, function() run("Retrying", doRetry) end)
+		btn("Repair", 135, 212, 110, nil, function() run("Repairing", doRepair) end)
+		btn("Kill Errors", 254, 212, 110, nil, function() run("Clearing errors", doKillErrors) end)
+		btn("Kill Ares / BxD restrictions", 16, 256, 348, T.red, function() run("Killing Ares/BxD", doKillAres) end)
+		local x = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10), Size = UDim2.fromOffset(24, 24),
+			BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = "×", Font = T.fontB, TextSize = 16, TextColor3 = T.text,
+			AutoButtonColor = false, ZIndex = 301, Parent = dlg }, { corner(12) })
+		x.Activated:Connect(hide)
+	end
+
+	function T.guardShow()
+		if dlg or not alive or os.clock() < st.nextAt then return end
+		st.nextAt = os.clock() + 120
+		task.defer(show)
+	end
+	-- called by the HTTP layer after every call
+	function T.guardNote(good, code, url)
+		if good then st.fails = 0; return end
+		url = tostring(url)
+		if not (url:find("firebaseio%.com") or url:find("googleapis%.com")) then return end
+		st.lastErr = (code and code > 0) and ("HTTP " .. code) or "no response"
+		if (not code or code == 0) or #scan() > 0 then
+			st.fails = st.fails + 1
+			if st.fails >= 3 then T.guardShow() end
+		end
+	end
+	function T.guardFail(why)
+		st.lastErr = tostring(why):sub(1, 80)
+		st.fails = st.fails + 1
+		if st.fails >= 3 then T.guardShow() end
+	end
+
+	task.delay(5, function() if alive and #scan(true) > 0 then T.guardShow() end end) -- Ares/BxD is running next to us
+end)()
 
 ----------------------------------------------------------------- avatar frames (drawn over every profile picture, in every tab)
 ;(function()
