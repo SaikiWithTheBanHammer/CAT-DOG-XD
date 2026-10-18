@@ -77,7 +77,51 @@ local CONFIG = {
 		demon  = { file = "DemonFrame.jpg",    w = 500, h = 500, cx = 253.0, cy = 272.0, r = 164.8 }, -- secret: Demon
 	},
 	TIER_FRAMES = { [2] = "t2", [3] = "t3", [4] = { "t4a", "t4b" }, [5] = "t5" }, -- tier -> frame (a list = the player picks one in Settings)
-	FRAME_USERS = {},                 -- secret frames for specific players: [robloxUserId] = "rose" or "cursed" or "demon"
+	FRAME_USERS = {},                 -- secret frames for specific players: [robloxUserId] = "rose" or "cursed" or "demon" or "x_<id>" (Frames2-Custom, see FRAMES2)
+	-- secret custom frames: github.com/SaikiWithTheBanHammer/Frames2-Custom  (key = "x_" .. id). Hole measures were auto-detected;
+	-- testers fine-tune them in the !atp panel (Frames lab) and export the final numbers.
+	FRAMES2_REPO = "Frames2-Custom",
+	FRAMES2 = {
+		{ id = "Frame1", file = "Frame1.png", w = 447, h = 559, cx = 224.5, cy = 282.4, r = 141.3 },
+		{ id = "FrameA", file = "FrameA-removebg-preview.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
+		{ id = "FrameB", file = "FrameB-removebg-preview.png", w = 447, h = 447, cx = 227.4, cy = 217.3, r = 142.1 },
+		{ id = "FrameC", file = "FrameC-removebg-preview.png", w = 318, h = 318, cx = 159.0, cy = 159.0, r = 95.4 }, -- hole not auto-detected: starting guess
+		{ id = "FrameD", file = "FrameD-removebg-preview.png", w = 500, h = 500, cx = 251.1, cy = 238.6, r = 153.7 },
+		{ id = "FrameE", file = "FrameE-removebg-preview(1).png", w = 500, h = 500, cx = 262.6, cy = 242.7, r = 172.0 },
+		{ id = "FrameF", file = "FrameF-removebg-preview.png", w = 360, h = 360, cx = 178.7, cy = 170.2, r = 88.8 },
+		{ id = "FrameG", file = "FrameG-removebg-preview.png", w = 400, h = 420, cx = 205.1, cy = 198.6, r = 88.8 },
+		{ id = "FrameH", file = "FrameH-removebg-preview.png", w = 205, h = 246, cx = 103.7, cy = 116.2, r = 65.8 },
+		{ id = "FrameI", file = "FrameI-removebg-preview.png", w = 360, h = 360, cx = 179.5, cy = 174.7, r = 85.2 },
+		{ id = "FrameJ", file = "FrameJ-removebg-preview.png", w = 400, h = 400, cx = 199.4, cy = 196.6, r = 106.6 },
+		{ id = "SilverFrame", file = "SilverFrame-removebg-preview.png", w = 400, h = 407, cx = 194.2, cy = 208.2, r = 131.2 },
+		{ id = "frame10", file = "frame10.png", w = 480, h = 499, cx = 240.1, cy = 255.4, r = 150.7 },
+		{ id = "frame11", file = "frame11.png", w = 500, h = 500, cx = 271.0, cy = 249.3, r = 162.4 },
+		{ id = "frame12", file = "frame12.png", w = 500, h = 500, cx = 245.2, cy = 240.2, r = 146.3 },
+		{ id = "frame13", file = "frame13.png", w = 500, h = 500, cx = 262.8, cy = 235.5, r = 166.6 },
+		{ id = "frame14", file = "frame14.png", w = 500, h = 500, cx = 247.8, cy = 253.2, r = 171.7 },
+		{ id = "frame15", file = "frame15.png", w = 500, h = 500, cx = 257.5, cy = 217.2, r = 133.6 },
+		{ id = "frame16", file = "frame16.png", w = 500, h = 500, cx = 272.7, cy = 267.1, r = 149.6 },
+		{ id = "frame17", file = "frame17.png", w = 500, h = 500, cx = 250.9, cy = 252.3, r = 120.5 },
+		{ id = "frame18", file = "frame18.png", w = 501, h = 498, cx = 252.2, cy = 236.9, r = 159.3 },
+		{ id = "frame19", file = "frame19.png", w = 342, h = 342, cx = 166.0, cy = 179.4, r = 128.3 },
+		{ id = "frame2", file = "frame2.png", w = 500, h = 500, cx = 251.9, cy = 235.5, r = 123.7 },
+		{ id = "frame20", file = "frame20.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
+		{ id = "frame21", file = "frame21.png", w = 500, h = 500, cx = 253.1, cy = 240.0, r = 129.9 },
+		{ id = "frame22", file = "frame22.png", w = 500, h = 500, cx = 250.9, cy = 252.3, r = 120.5 },
+		{ id = "frame23", file = "frame23.png", w = 500, h = 500, cx = 260.5, cy = 250.9, r = 153.3 },
+		{ id = "frame24", file = "frame24.png", w = 500, h = 500, cx = 275.6, cy = 243.1, r = 164.2 },
+		{ id = "frame25", file = "frame25.jph.png", w = 342, h = 342, cx = 171.4, cy = 172.0, r = 120.7 },
+		{ id = "frame26", file = "frame26.png", w = 500, h = 500, cx = 255.0, cy = 228.9, r = 93.5 },
+		{ id = "frame28", file = "frame28.png", w = 500, h = 500, cx = 251.1, cy = 255.8, r = 147.9 },
+		{ id = "frame29", file = "frame29.png", w = 500, h = 500, cx = 238.1, cy = 241.0, r = 124.9 },
+		{ id = "frame30", file = "frame30.png", w = 500, h = 500, cx = 249.9, cy = 272.2, r = 145.0 },
+		{ id = "frame31", file = "frame31.png", w = 523, h = 477, cx = 274.8, cy = 235.7, r = 136.6 },
+		{ id = "frame32", file = "frame32.png", w = 509, h = 490, cx = 257.1, cy = 228.7, r = 140.6 },
+		{ id = "frame8", file = "frame8.png", w = 360, h = 360, cx = 171.8, cy = 170.9, r = 115.5 },
+		{ id = "frame9", file = "frame9.png", w = 500, h = 500, cx = 249.1, cy = 255.5, r = 164.9 },
+		{ id = "frames7", file = "frames7.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
+		{ id = "golddragon", file = "golddragon.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
+	},
 	FRAME_FIT = 0.95,                 -- 1 = the frame's hole is exactly as big as the picture; lower = picture tucks a little under the ring
 	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras, titles, frames and the !anc command are live)
 		{},
@@ -3094,6 +3138,9 @@ end)()
 	local assets, loading = {}, {}
 	local reg = setmetatable({}, { __mode = "k" })    -- avatar image -> { uid, img }
 	local hooked = setmetatable({}, { __mode = "k" })
+	for _, d in ipairs(CONFIG.FRAMES2 or {}) do
+		CONFIG.FRAMES["x_" .. d.id] = { file = d.file, repo = CONFIG.FRAMES2_REPO, w = d.w, h = d.h, cx = d.cx, cy = d.cy, r = d.r }
+	end
 	ensureFolder(CACHE .. "/frames")
 	T.frameChoice = {}                                 -- [userId] = 1 or 2 (Tier IV pick)
 
@@ -3132,7 +3179,7 @@ end)()
 		if not def then return end
 		loading[key] = true
 		task.spawn(function()
-			local url = "https://raw.githubusercontent.com/" .. GITHUB_OWNER .. "/Frames-XD/main/" .. enc(def.file)
+			local url = "https://raw.githubusercontent.com/" .. GITHUB_OWNER .. "/" .. (def.repo or "Frames-XD") .. "/main/" .. enc(def.file)
 			local path = CACHE .. "/frames/" .. key .. ".png"
 			local a = limited(function() return cachedAsset(url, path) end)
 			loading[key] = nil
@@ -3160,10 +3207,13 @@ end)()
 			rec.img = new("ImageLabel", { Name = "SaikiFrame", BackgroundTransparency = 1, Active = false, Image = "", Parent = o })
 		end
 		local s = (CONFIG.FRAME_FIT or 0.95) / (2 * def.r) -- fraction of the avatar's size per image pixel
+		local adj = T.frameAdj and T.frameAdj[key]        -- tester adjustments from the !atp panel (nil for everyone else)
+		local dx, dy = 0, 0
+		if adj then s = s * (adj.sz or 1); dx, dy = adj.dx or 0, adj.dy or 0 end
 		rec.img.ZIndex = o.ZIndex + 1
 		rec.img.Image = a
 		rec.img.Size = UDim2.fromScale(def.w * s, def.h * s)
-		rec.img.Position = UDim2.fromScale(0.5 - def.cx * s, 0.5 - def.cy * s)
+		rec.img.Position = UDim2.fromScale(0.5 - def.cx * s + dx, 0.5 - def.cy * s + dy)
 	end
 
 	function T.refreshFrames()
@@ -4334,10 +4384,167 @@ H.bind(Players.PlayerRemoving, function(p) destroyAura(p) end)
 local DEVS = { moosman99999 = true, kabir_priv = true, yorichii_566 = true }
 if DEVS[string.lower(LP.Name)] then
 	local new, corner, stroke, grad, tween = H.new, H.corner, H.stroke, H.grad, H.tween
+	local CONFIG = H.CONFIG
 	local WHITE = Color3.new(1, 1, 1)
 	local panel
+	---------------- custom frames lab (Frames2-Custom): wear a frame, adjust X / Y / Size, export every measure
+	local lab, labScroll
+	local function closeLab()
+		if lab then lab:Destroy(); lab, labScroll = nil, nil end
+	end
+	local activeDrag -- the slider being dragged right now: function(screenX)
+	do
+		local UIS = game:GetService("UserInputService")
+		H.bind(UIS.InputChanged, function(i)
+			if activeDrag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+				activeDrag(i.Position.X)
+			end
+		end)
+		H.bind(UIS.InputEnded, function(i)
+			if activeDrag and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+				activeDrag = nil
+				if labScroll then labScroll.ScrollingEnabled = true end
+			end
+		end)
+	end
+	T.frameAdj = T.frameAdj or {}
+	local function adjOf(key)
+		local a = T.frameAdj[key]
+		if not a then a = { dx = 0, dy = 0, sz = 1 }; T.frameAdj[key] = a end
+		return a
+	end
+	local function exportText()
+		local FIT = CONFIG.FRAME_FIT or 0.95
+		local out = {
+			"-- Frames2-Custom measures exported by " .. LP.Name .. "  (FRAME_FIT = " .. FIT .. ")",
+			"-- cx / cy / r are paste-ready: they already include the X / Y / Size adjustments made on the sliders.",
+			"-- 'adjust' shows what was moved: x / y in % of the avatar size, size in %.  (* = this frame was adjusted)",
+		}
+		for _, d in ipairs(CONFIG.FRAMES2 or {}) do
+			local a = adjOf("x_" .. d.id)
+			local s = FIT / (2 * d.r) * a.sz
+			local touched = (a.dx ~= 0 or a.dy ~= 0 or a.sz ~= 1)
+			out[#out + 1] = string.format('x_%s = { file = "%s", repo = "%s", w = %d, h = %d, cx = %.1f, cy = %.1f, r = %.1f }, -- adjust: x %+.1f%% y %+.1f%% size %d%%%s',
+				d.id, d.file, CONFIG.FRAMES2_REPO or "Frames2-Custom", d.w, d.h, d.cx - a.dx / s, d.cy - a.dy / s, d.r / a.sz,
+				a.dx * 100, a.dy * 100, math.floor(a.sz * 100 + 0.5), touched and " *" or "")
+		end
+		return table.concat(out, "\n")
+	end
+	local function openLab()
+		closeLab()
+		local list = CONFIG.FRAMES2 or {}
+		local PH = math.min(430, math.max(260, H.gui.AbsoluteSize.Y - 30))
+		lab = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 14, 0.5, 0), Size = UDim2.fromOffset(344, PH),
+			BackgroundColor3 = T.bg, BackgroundTransparency = 0.04, ZIndex = 70, Parent = H.gui }, { corner(16), stroke(0.7) })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 10), Size = UDim2.new(1, -56, 0, 20), BackgroundTransparency = 1,
+			Text = "Custom frames lab  ·  " .. #list, Font = T.fontB, TextSize = 15, TextColor3 = T.text,
+			TextXAlignment = Enum.TextXAlignment.Left, Parent = lab })
+		new("TextLabel", { Position = UDim2.fromOffset(14, 32), Size = UDim2.new(1, -28, 0, 28), BackgroundTransparency = 1, TextWrapped = true,
+			Text = "Tap Wear to put a frame on every avatar (only you see it), then adjust X / Y / Size. Export copies all measures.",
+			Font = T.font, TextSize = 11, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Parent = lab })
+		local x = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 8), Size = UDim2.fromOffset(28, 28),
+			BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 22, TextColor3 = T.mut, AutoButtonColor = false, Parent = lab })
+		x.Activated:Connect(closeLab)
+
+		local sc = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 64), Size = UDim2.new(1, -16, 1, -64 - 52), BackgroundTransparency = 1,
+			BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = T.mut, CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = lab }, { new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }) })
+		labScroll = sc
+
+		local wearBtns = {}
+		local function paintWear()
+			for key, b in pairs(wearBtns) do
+				local on = (T.frameTest == key)
+				b.BackgroundColor3 = on and T.accA or WHITE
+				b.BackgroundTransparency = on and 0 or 0.86
+				b.Text = on and "Worn" or "Wear"
+			end
+		end
+		local function slider(card, y, label, minv, maxv, step, get, set, fmt)
+			new("TextLabel", { Position = UDim2.fromOffset(10, y), Size = UDim2.fromOffset(34, 18), BackgroundTransparency = 1, Text = label,
+				Font = T.fontB, TextSize = 11, TextColor3 = T.mut, TextXAlignment = Enum.TextXAlignment.Left, Parent = card })
+			local val = new("TextLabel", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, y), Size = UDim2.fromOffset(58, 18),
+				BackgroundTransparency = 1, Text = "", Font = T.fontB, TextSize = 11, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Right, Parent = card })
+			local hit = new("TextButton", { Position = UDim2.fromOffset(46, y - 3), Size = UDim2.new(1, -118, 0, 24), BackgroundTransparency = 1,
+				Text = "", AutoButtonColor = false, Parent = card })
+			local bar = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0), Size = UDim2.new(1, 0, 0, 4),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.8, Parent = hit }, { corner(2) })
+			local knob = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), Size = UDim2.fromOffset(14, 14),
+				BackgroundColor3 = WHITE, Parent = bar }, { corner(7) })
+			local function show()
+				knob.Position = UDim2.fromScale(math.clamp((get() - minv) / (maxv - minv), 0, 1), 0.5)
+				val.Text = fmt(get())
+			end
+			local function fromX(px)
+				local f = math.clamp((px - bar.AbsolutePosition.X) / math.max(1, bar.AbsoluteSize.X), 0, 1)
+				local v = math.floor((minv + f * (maxv - minv)) / step + 0.5) * step
+				set(math.clamp(v, minv, maxv))
+				show()
+				if T.refreshFrames then pcall(T.refreshFrames) end
+			end
+			hit.InputBegan:Connect(function(i)
+				if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+					activeDrag = fromX
+					sc.ScrollingEnabled = false
+					fromX(i.Position.X)
+				end
+			end)
+			show()
+			return show
+		end
+
+		for n, d in ipairs(list) do
+			local key = "x_" .. d.id
+			local a = adjOf(key)
+			local card = new("Frame", { Size = UDim2.new(1, -6, 0, 134), BackgroundColor3 = WHITE, BackgroundTransparency = 0.93, LayoutOrder = n, Parent = sc }, { corner(12) })
+			new("TextLabel", { Position = UDim2.fromOffset(10, 8), Size = UDim2.new(1, -150, 0, 24), BackgroundTransparency = 1,
+				Text = n .. ".  " .. d.id, Font = T.fontB, TextSize = 13, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
+			local wear = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -68, 0, 8), Size = UDim2.fromOffset(58, 24),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.86, Text = "Wear", Font = T.fontB, TextSize = 11, TextColor3 = T.text,
+				AutoButtonColor = false, Parent = card }, { corner(12) })
+			wearBtns[key] = wear
+			local reset = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 8), Size = UDim2.fromOffset(54, 24),
+				BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = "Reset", Font = T.fontB, TextSize = 11, TextColor3 = T.mut,
+				AutoButtonColor = false, Parent = card }, { corner(12) })
+			local shows = {}
+			shows[1] = slider(card, 44, "X", -30, 30, 0.5, function() return a.dx * 100 end, function(v) a.dx = v / 100 end,
+				function(v) return string.format("%+.1f%%", v) end)
+			shows[2] = slider(card, 72, "Y", -30, 30, 0.5, function() return a.dy * 100 end, function(v) a.dy = v / 100 end,
+				function(v) return string.format("%+.1f%%", v) end)
+			shows[3] = slider(card, 100, "Size", 50, 150, 1, function() return a.sz * 100 end, function(v) a.sz = v / 100 end,
+				function(v) return string.format("%d%%", math.floor(v + 0.5)) end)
+			wear.Activated:Connect(function()
+				T.frameTest = (T.frameTest ~= key) and key or nil
+				paintWear()
+				if T.refreshFrames then pcall(T.refreshFrames) end
+			end)
+			reset.Activated:Connect(function()
+				a.dx, a.dy, a.sz = 0, 0, 1
+				for _, sh in ipairs(shows) do sh() end
+				if T.refreshFrames then pcall(T.refreshFrames) end
+			end)
+		end
+		paintWear()
+
+		local exp = new("TextButton", { Position = UDim2.new(0, 10, 1, -44), Size = UDim2.new(1, -20, 0, 34), BackgroundColor3 = WHITE,
+			Text = "Export all measures (copy)", Font = T.fontB, TextSize = 13, TextColor3 = Color3.fromRGB(15, 17, 25), AutoButtonColor = false,
+			Parent = lab }, { corner(17), grad(20) })
+		exp.Activated:Connect(function()
+			local text = exportText()
+			local fn = setclipboard or toclipboard or (syn and syn.write_clipboard)
+			if fn and pcall(fn, text) then
+				H.toast("Copied " .. #list .. " frames to the clipboard")
+			else
+				for i = 1, #text, 3500 do print(text:sub(i, i + 3499)) end
+				H.toast("No clipboard here: printed to F9")
+			end
+		end)
+	end
+
 	local function closePanel()
 		if panel then panel:Destroy(); panel = nil end
+		closeLab()
 	end
 	local function recount()
 		testOn = next(testKinds) ~= nil
@@ -4355,6 +4562,10 @@ if DEVS[string.lower(LP.Name)] then
 		local x = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 8), Size = UDim2.fromOffset(28, 28),
 			BackgroundTransparency = 1, Text = "×", Font = T.fontB, TextSize = 22, TextColor3 = T.mut, AutoButtonColor = false, ZIndex = 61, Parent = panel })
 		x.Activated:Connect(closePanel)
+		local labBtn = new("TextButton", { Position = UDim2.fromOffset(124, 8), Size = UDim2.fromOffset(82, 24), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.86, Text = "Frames lab ›", Font = T.fontB, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false,
+			ZIndex = 62, Parent = panel }, { corner(12) })
+		labBtn.Activated:Connect(function() if lab then closeLab() else openLab() end end)
 		local rows = { { "halo", "Angel Halo  ·  Tier II" }, { "hand", "Cursed Hand  ·  Tier III" }, { "wheel", "Mahoraga Wheel  ·  Tier IV" } }
 		local switches = {}
 		local function addSwitch(parent, on, onChange)
