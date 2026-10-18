@@ -3706,20 +3706,34 @@ local WHITE = Color3.new(1, 1, 1)
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
 local TextService = game:GetService("TextService")
+local RunService = game:GetService("RunService")
 local DISCORD, DISCORD_CODE = "https://discord.gg/63eEChZ6YU", "63eEChZ6YU"
 local INK2 = Color3.fromRGB(15, 17, 25)
 
 ---------------------------------------------------------------- saved settings
 local FILE = H.cache .. "/settings_" .. H.me .. ".json"
 local MAXMSG = CONFIG.MAX_MESSAGES
+local WHITEC = Color3.new(1, 1, 1)
+local function mk(bg, accA, accB, light)
+	local t = { bg = bg, accA = accA, accB = accB, text = Color3.fromRGB(240, 242, 250), mut = Color3.fromRGB(150, 156, 175), ov = WHITEC, bgT = 0.2 }
+	if light then for k, v in pairs(light) do t[k] = v end end
+	return t
+end
 local THEMES = {
-	Dark   = { bg = Color3.fromRGB(14, 16, 24), accA = Color3.fromRGB(124, 92, 255), accB = Color3.fromRGB(64, 180, 255) },
-	AMOLED = { bg = Color3.fromRGB(0, 0, 0),    accA = Color3.fromRGB(140, 100, 255), accB = Color3.fromRGB(70, 190, 255) },
-	Ocean  = { bg = Color3.fromRGB(8, 20, 32),  accA = Color3.fromRGB(0, 140, 255),   accB = Color3.fromRGB(0, 220, 200) },
-	Sunset = { bg = Color3.fromRGB(26, 14, 20), accA = Color3.fromRGB(255, 100, 110), accB = Color3.fromRGB(255, 176, 64) },
-	Forest = { bg = Color3.fromRGB(10, 22, 16), accA = Color3.fromRGB(60, 190, 120),  accB = Color3.fromRGB(150, 225, 80) },
+	Dark   = mk(Color3.fromRGB(14, 16, 24), Color3.fromRGB(124, 92, 255), Color3.fromRGB(64, 180, 255)),
+	AMOLED = mk(Color3.fromRGB(0, 0, 0),    Color3.fromRGB(140, 100, 255), Color3.fromRGB(70, 190, 255)),
+	Ocean  = mk(Color3.fromRGB(8, 20, 32),  Color3.fromRGB(0, 140, 255),   Color3.fromRGB(0, 220, 200)),
+	Sunset = mk(Color3.fromRGB(26, 14, 20), Color3.fromRGB(255, 100, 110), Color3.fromRGB(255, 176, 64)),
+	Forest = mk(Color3.fromRGB(10, 22, 16), Color3.fromRGB(60, 190, 120),  Color3.fromRGB(150, 225, 80)),
+	-- soft pink, solid (opaque) window, dark text
+	Lovely = mk(Color3.fromRGB(255, 233, 241), Color3.fromRGB(255, 98, 158), Color3.fromRGB(176, 108, 255),
+		{ text = Color3.fromRGB(62, 30, 52), mut = Color3.fromRGB(160, 104, 134), ov = Color3.fromRGB(214, 60, 120), bgT = 0 }),
+	-- premium cream + gold, solid (opaque) window, dark brown text
+	Gold   = mk(Color3.fromRGB(255, 246, 214), Color3.fromRGB(230, 148, 0), Color3.fromRGB(255, 198, 36),
+		{ text = Color3.fromRGB(64, 45, 8), mut = Color3.fromRGB(150, 118, 42), ov = Color3.fromRGB(176, 120, 0), bgT = 0 }),
 }
-local ORDER = { "Dark", "AMOLED", "Ocean", "Sunset", "Forest" }
+local ORDER = { "Dark", "AMOLED", "Ocean", "Sunset", "Forest", "Lovely", "Gold" }
+if T.ov == nil then T.ov = WHITEC end
 local V = { theme = "Dark", anim = true, aura = true, notif = true, guiMul = 1, anchored = true, ox = 0, oy = 0 }
 pcall(function()
 	if isfile and readfile and isfile(FILE) then
@@ -3882,7 +3896,7 @@ end
 header("Appearance")
 local setTheme
 do
-	local text = "Changes the window colours. Dark is the default. AMOLED uses pure black, which looks great on OLED screens and saves battery."
+	local text = "Changes the window colours with a smooth fade. Dark is the default. AMOLED is pure black (great on OLED screens). Lovely is a soft pink and Gold a premium cream-and-gold look; both have a solid, see-through-free window."
 	local dh = textH(text, 12, 447 - 24)
 	local c = card(33 + dh + 10 + 36 + 12)
 	local y = title(c, "Theme")
@@ -3898,53 +3912,115 @@ do
 			tween(ch.str, 0.2, { Transparency = sel and 0.35 or 0.92 })
 		end
 	end
-	local function recolor(old, th)
+	local function paletteMap(old, new, keys)
 		local map = {}
-		for _, k in ipairs({ "bg", "accA", "accB" }) do
-			if old[k] ~= th[k] then map[#map + 1] = { old[k], th[k] } end
+		for _, k in ipairs(keys) do
+			if old[k] ~= new[k] then map[#map + 1] = { old[k], new[k] } end
 		end
-		local function m(col)
+		return function(col)
 			for _, p in ipairs(map) do if col == p[1] then return p[2] end end
 			return nil
 		end
+	end
+	local function isAccentFill(o) return o:FindFirstChildOfClass("UIGradient") ~= nil end
+	local function recolor(old, th, instant)
+		local ovOn = (old.ov ~= th.ov)
+		local mBg = paletteMap(old, th, { "bg", "accA", "accB" })
+		local mTx = paletteMap(old, th, { "text", "mut", "accA", "accB" })
+		local mGr = paletteMap(old, th, { "bg", "accA", "accB" })
+		local function ovBg(o)
+			if not ovOn or isAccentFill(o) then return nil end
+			local col = o.BackgroundColor3
+			if old.ov == WHITEC then
+				if col == WHITEC and o.BackgroundTransparency >= 0.5 then return th.ov end
+			elseif col == old.ov then
+				return th.ov
+			end
+			return nil
+		end
+		local btn = gui:FindFirstChild("SaikiButton") -- the open/close button keeps its own look in every theme
+		local entries = {}
+		local function add(o, prop, to) entries[#entries + 1] = { o = o, p = prop, from = o[prop], to = to } end
 		local list = gui:GetDescendants()
 		for i, o in ipairs(list) do
-			if o:IsA("GuiObject") then
-				local n = m(o.BackgroundColor3)
-				if n then o.BackgroundColor3 = n end
-				if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
-					local t2 = m(o.TextColor3)
-					if t2 then o.TextColor3 = t2 end
-				elseif o:IsA("ImageLabel") or o:IsA("ImageButton") then
-					local i2 = m(o.ImageColor3)
-					if i2 then o.ImageColor3 = i2 end
-				elseif o:IsA("ScrollingFrame") then
-					local s2 = m(o.ScrollBarImageColor3)
-					if s2 then o.ScrollBarImageColor3 = s2 end
+			if not (btn and (o == btn or o:IsDescendantOf(btn))) then
+				if o:IsA("GuiObject") then
+					local n = ovBg(o) or mBg(o.BackgroundColor3)
+					if n then add(o, "BackgroundColor3", n) end
+					if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+						local t2 = mTx(o.TextColor3)
+						if t2 then add(o, "TextColor3", t2) end
+					elseif o:IsA("ScrollingFrame") then
+						local s2 = mTx(o.ScrollBarImageColor3)
+						if s2 then add(o, "ScrollBarImageColor3", s2) end
+					end
+				elseif o:IsA("UIStroke") then
+					if ovOn and o.Color == old.ov then add(o, "Color", th.ov) end
+				elseif o:IsA("UIGradient") then
+					local kps, to, changed = o.Color.Keypoints, {}, false
+					for k, kp in ipairs(kps) do
+						local n = mGr(kp.Value)
+						if n then changed = true end
+						to[k] = n or kp.Value
+					end
+					if changed then entries[#entries + 1] = { o = o, seq = true, kps = kps, to = to } end
 				end
-			elseif o:IsA("UIGradient") then
-				local out, changed = {}, false
-				for k, kp in ipairs(o.Color.Keypoints) do
-					local n = m(kp.Value)
-					if n then changed = true end
-					out[k] = ColorSequenceKeypoint.new(kp.Time, n or kp.Value)
-				end
-				if changed then o.Color = ColorSequence.new(out) end
 			end
-			if i % 250 == 0 then task.wait() end
+			if i % 300 == 0 then task.wait() end
 		end
+		local function frame(e)
+			for _, en in ipairs(entries) do
+				if en.o.Parent then
+					if en.seq then
+						local out = {}
+						for k, kp in ipairs(en.kps) do out[k] = ColorSequenceKeypoint.new(kp.Time, kp.Value:Lerp(en.to[k], e)) end
+						en.o.Color = ColorSequence.new(out)
+					else
+						en.o[en.p] = en.from:Lerp(en.to, e)
+					end
+				end
+			end
+		end
+		if instant then
+			win.BackgroundTransparency = th.bgT
+			frame(1)
+			return
+		end
+		tween(win, 0.5, { BackgroundTransparency = th.bgT })
+		local t0 = os.clock()
+		while true do
+			local f = math.clamp((os.clock() - t0) / 0.5, 0, 1)
+			frame(f * f * (3 - 2 * f)) -- smooth ease in/out
+			if f >= 1 then break end
+			RunService.Heartbeat:Wait()
+		end
+		frame(1)
 	end
-	function setTheme(name)
+	function setTheme(name, instant)
 		local th = THEMES[name]
 		if busy or not th then return end
 		busy = true
-		local old = { bg = T.bg, accA = T.accA, accB = T.accB }
-		T.bg, T.accA, T.accB = th.bg, th.accA, th.accB
+		local old = { bg = T.bg, accA = T.accA, accB = T.accB, text = T.text, mut = T.mut, ov = T.ov or WHITEC }
+		T.bg, T.accA, T.accB, T.text, T.mut, T.ov, T.bgT = th.bg, th.accA, th.accB, th.text, th.mut, th.ov, th.bgT
 		task.spawn(function()
-			pcall(recolor, old, th)
+			pcall(recolor, old, th, instant)
 			busy = false
 		end)
 	end
+	-- things created later (new chat messages, popups...) get the theme's overlay colour too
+	H.bind(gui.DescendantAdded, function(o)
+		if T.ov == WHITEC then return end
+		task.defer(function()
+			if not o.Parent then return end
+			local btn = gui:FindFirstChild("SaikiButton")
+			if btn and (o == btn or o:IsDescendantOf(btn)) then return end
+			if o:IsA("GuiObject") then
+				if o.BackgroundColor3 == WHITEC and o.BackgroundTransparency >= 0.5 and not isAccentFill(o) then o.BackgroundColor3 = T.ov end
+			elseif o:IsA("UIStroke") then
+				if o.Color == WHITEC then o.Color = T.ov end
+			end
+		end)
+	end)
 	for i, name in ipairs(ORDER) do
 		local th = THEMES[name]
 		local sel = (name == V.theme)
@@ -4123,7 +4199,7 @@ new("TextLabel", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Te
 ---------------------------------------------------------------- apply saved settings
 T.anim, T.aura, T.guiMul, T.notif = V.anim, V.aura, V.guiMul, V.notif
 if not V.anim then CONFIG.MAX_MESSAGES = 40 end
-if V.theme ~= "Dark" then setTheme(V.theme) end
+if V.theme ~= "Dark" then setTheme(V.theme, true) end
 H.expose(V)
 ]==])
 	plug(nil, "Auras", [==[
