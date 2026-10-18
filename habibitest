@@ -59,14 +59,17 @@ local CONFIG = {
 	DM_SHOW = 60,             -- messages drawn when a DM opens (older stay on disk)
 	STICKER_LIST_TTL = 86400, -- seconds before re-checking GitHub for new stickers
 	TIER_AT = { 0, 30, 60, 90, 120 }, -- followers needed for Tier I, II, III, IV, V (edit freely)
-	TITLES = { "", "Rising Star", "Trendsetter", "Icon", "Legend" }, -- shown next to the name in chat, one per tier (edit freely, "" = none)
+	TITLES = { "", "PLUS", "PRIME", "PRESTIGE", "ASCENDANT" }, -- shown next to the name in chat, one per tier (edit freely, "" = none)
+	ANNOUNCE_MIN_TIER = 4,            -- !anc <text> in the server chat: needs this tier or higher
+	ANNOUNCE_COOLDOWN = 20,           -- seconds between your own announcements
+	ANNOUNCE_SOUND = 128187340772806, -- plays on everyone's device when an announcement arrives
 	TOP_RANK_TAG = 50,                -- players in the top N get a #topN tag next to their name in chat
-	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras + titles are live; announcements are not yet)
+	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras, titles and the !anc command are live)
 		{},
-		{ "Rising Star", "Angel Halo aura" },
-		{ "Trendsetter", "Cursed Hand aura" },
-		{ "Icon", "Mahoraga Wheel aura" },
-		{ "Legend", "Secret Aura", "Announcement command" },
+		{ "PLUS", "Angel Halo aura" },
+		{ "PRIME", "Cursed Hand aura" },
+		{ "PRESTIGE", "Mahoraga Wheel aura", "Announcement command" },
+		{ "ASCENDANT", "Secret Aura" },
 	},
 	-- security
 	IDENTITY_INTERVAL = 45,   -- seconds between identity checks
@@ -601,11 +604,17 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 		local txt = clean(box.Text)
 		if txt == "" then return end
 		if T.chatCommand and T.chatCommand(txt) then box.Text = ""; return end -- dev-only test command (never sent as a message)
+		local low = txt:lower()
+		if (low == "!anc" or low:sub(1, 5) == "!anc ") and T.annSend then -- announcement command (checked + sent by T.annSend)
+			if T.annSend(self, txt) then box.Text = "" end
+			return
+		end
 		if fire({ text = txt }) then box.Text = "" end
 	end
 	bind(btn.Activated, submit)
 	bind(box.FocusLost, function(enter) if enter then submit() end end)
 	function self.sendSticker(ref) return fire({ stk = ref }) end
+	function self.sendText(t) return fire({ text = t }) end
 
 	-- ===== reactions =====
 	local function renderReactions(key)
@@ -781,6 +790,46 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 			old:Destroy()
 		end
 		if atBottom or mine then
+			task.defer(function()
+				RunService.Heartbeat:Wait()
+				if alive then list.CanvasPosition = Vector2.new(0, math.max(0, list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y)) end
+			end)
+		end
+	end
+
+	-- announcement: a full-width icy banner, nothing like a normal bubble
+	function self.addAnnouncement(m)
+		self.n += 1
+		self.lastUid = nil
+		local atBottom = list.CanvasPosition.Y >= list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y - 40
+		local ICE, FROST = Color3.fromRGB(130, 232, 255), Color3.fromRGB(232, 248, 255)
+		local card = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.02, LayoutOrder = self.n, Parent = list }, {
+			corner(8),
+			new("UIStroke", { Color = Color3.fromRGB(120, 224, 255), Thickness = 1.5, Transparency = 0.05,
+				ApplyStrokeMode = Enum.ApplyStrokeMode.Border }),
+			new("UIGradient", { Color = ColorSequence.new(Color3.fromRGB(24, 78, 120), Color3.fromRGB(7, 22, 42)), Rotation = 90 }),
+			new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, HorizontalAlignment = Enum.HorizontalAlignment.Center,
+				Padding = UDim.new(0, 5) }),
+			new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+				PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }),
+		})
+		new("TextLabel", { Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = "-  A N N O U N C E M E N T  -",
+			Font = Enum.Font.GothamBlack, TextSize = 11, TextColor3 = ICE, LayoutOrder = 1, Parent = card })
+		new("TextLabel", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+			Text = tostring(m.text or ""), TextWrapped = true, Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = FROST,
+			TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 2, Parent = card })
+		new("TextLabel", { Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+			Text = tostring(m.name or "") .. ((m.title and m.title ~= "") and ("   |   " .. m.title) or ""),
+			Font = T.fontB, TextSize = 11, TextColor3 = Color3.fromRGB(130, 178, 206), LayoutOrder = 3, Parent = card })
+		self.rows[#self.rows + 1] = card
+		if #self.rows > CONFIG.MAX_MESSAGES then
+			local old = table.remove(self.rows, 1)
+			local k = old:GetAttribute("k")
+			if k then self.items[k] = nil; self.reacts[k] = nil; self.mineLock[k] = nil end
+			old:Destroy()
+		end
+		if atBottom then
 			task.defer(function()
 				RunService.Heartbeat:Wait()
 				if alive then list.CanvasPosition = Vector2.new(0, math.max(0, list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y)) end
@@ -1069,7 +1118,7 @@ views[1] = ChatView(container, function(p)
 		if ok and type(res) == "table" and res.name then
 			if not serverStream.seen[res.name] then
 				serverStream.seen[res.name] = true
-				views[1].add({ uid = ME, name = LP.DisplayName, text = p.text or "", stk = p.stk, reply = p.reply, key = res.name })
+				T.showServer(ME, LP.DisplayName, p.text or "", p.stk, res.name, p.reply, false)
 			end
 		else
 			sendFail(views[1], raw, code, "sxkicxat " .. serverStream.path)
@@ -1079,7 +1128,46 @@ end, CONFIG.COOLDOWN_SERVER, "Message Saiki Server", function(key, e)
 	sendReaction(serverStream.rpath, auth, FIREBASE_DB, key, e)
 end)
 pages[1] = views[1].root
+views[1].allowAnc = true -- the !anc command works in this chat only
 if not REQUEST then views[1].notice("No HTTP function found: running in local demo mode.") end
+
+-- one place that draws a server-chat message: normal bubble, or (for "!anc text" from a high enough tier) the announcement banner
+function T.playAnc()
+	pcall(function()
+		local s = Instance.new("Sound")
+		s.SoundId = "rbxassetid://" .. tostring(CONFIG.ANNOUNCE_SOUND)
+		s.Volume = 1
+		s.Parent = game:GetService("SoundService")
+		s.Ended:Connect(function() s:Destroy() end)
+		task.delay(30, function() if s.Parent then s:Destroy() end end)
+		s:Play()
+	end)
+end
+function T.showServer(uid, name, text, stk, key, reply, silent)
+	local function plain()
+		views[1].add({ uid = uid, name = name, text = text, stk = stk, key = key, reply = reply })
+		if not silent then markUnread(1, uid) end
+		if not silent and not isOpen and tostring(uid) ~= ME and T.notify then -- window closed: pop-up for new server chat messages
+			T.notify("srv", "Server chat  ·  " .. name, stk and "Sticker" or text)
+		end
+	end
+	local body = (not stk) and type(text) == "string" and text:lower():sub(1, 5) == "!anc " and text:match("^%S+%s+(.+)$")
+	if not body then plain(); return end
+	local function decide(tier)
+		if tier and tier >= (CONFIG.ANNOUNCE_MIN_TIER or 4) then
+			views[1].addAnnouncement({ name = name, text = body, title = CONFIG.TITLES and CONFIG.TITLES[tier] or "" })
+			if not silent then
+				T.playAnc()
+				markUnread(1, uid)
+				if not isOpen and T.notify then T.notify("anc", "Announcement  ·  " .. name, body) end
+			end
+		else
+			plain() -- sender isn't allowed to announce: it's just a normal message
+		end
+	end
+	local tier = T.annTier and T.annTier(uid, false)
+	if tier ~= nil then decide(tier) else task.spawn(function() decide(T.annTier and T.annTier(uid, true)) end) end
+end
 
 local function serverHandler(key, m, silent)
 	local uid = tonumber(m.uid)
@@ -1088,11 +1176,7 @@ local function serverHandler(key, m, silent)
 	if not text then return end
 	local p = Players:GetPlayerByUserId(uid)
 	local name = p and p.DisplayName or (type(m.dn) == "string" and m.dn:sub(1, 40)) or "Player"
-	views[1].add({ uid = uid, name = name, text = text, stk = stk, key = key, reply = parseReply(m) })
-	if not silent then markUnread(1, uid) end
-	if not silent and not isOpen and tostring(uid) ~= ME and T.notify then -- window closed: pop-up for new server chat messages
-		T.notify("srv", "Server chat  ·  " .. name, stk and "Sticker" or text)
-	end
+	T.showServer(uid, name, text, stk, key, parseReply(m), silent)
 end
 if REQUEST then task.spawn(function() pollStream(serverStream, serverHandler) end) end -- remember "now", draw nothing old
 
@@ -2005,7 +2089,7 @@ do
 				new("Frame", { Size = UDim2.fromScale(pct, 1), BackgroundColor3 = WHITE, Parent = tb }, { corner(2), grad(0) })
 			end
 		end
-		addEmpty(sc, "Auras and titles are live. The Announcement command comes in a later update.", 9, 40)
+		addEmpty(sc, "Auras, titles and the Announcement command (!anc) are live.", 9, 40)
 
 		addHeader(sc, "Following", 10, tostring(nFollowing))
 		local fl = {}
@@ -2032,6 +2116,35 @@ do
 		end
 	end
 	FS.render()
+
+	-- ===== announcements (!anc): everyone checks the sender's tier themselves before drawing a banner =====
+	-- tier of a user: from the cached follower count, or (wait = true) looked up now. nil = couldn't tell.
+	function T.annTier(uid, wait)
+		local id = string.format("%.0f", tonumber(uid) or 0)
+		local c = FS.cache[id]
+		if c and os.clock() - c.t < 120 then return FS.tierOf(c.c) end
+		if not wait then return nil end
+		local n = FS.count(id, true)
+		return n and FS.tierOf(n) or nil
+	end
+	-- called when "!anc ..." is typed in a chat box; true = handled (sent), false = kept in the box
+	function T.annSend(view, txt)
+		if not view.allowAnc then view.notice("!anc only works in the Saiki Server chat."); return false end
+		local body = txt:match("^%S+%s+(.+)$")
+		if not body then view.notice("Usage: !anc your announcement"); return false end
+		local min = CONFIG.ANNOUNCE_MIN_TIER or 4
+		local tier = T.annTier(ME, true)
+		if not tier then view.notice("Couldn't check your tier right now, try again in a moment."); return false end
+		if tier < min then
+			local t = CONFIG.TITLES and CONFIG.TITLES[min] or ""
+			view.notice("Announcements unlock at Tier " .. tostring(FS.ROMAN[min] or min) .. ((t ~= "") and (" (" .. t .. ")") or "") .. ".")
+			return false
+		end
+		local left = (T.annLast or -1e9) + (CONFIG.ANNOUNCE_COOLDOWN or 20) - os.clock()
+		if left > 0 then view.notice("Announcement cooldown: " .. math.ceil(left) .. "s"); return false end
+		if view.sendText("!anc " .. body) then T.annLast = os.clock(); return true end
+		return false
+	end
 
 	-- ===== chat name tags: tier title + #top rank (one /followers download feeds everyone, shared + cached) =====
 	do
