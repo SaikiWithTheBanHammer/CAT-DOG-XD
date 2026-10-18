@@ -2348,10 +2348,10 @@ end
 
 		new("ImageLabel", { Position = UDim2.fromOffset(18, 18), Size = UDim2.fromOffset(64, 64), BackgroundColor3 = WHITE,
 			BackgroundTransparency = 0.88, Image = thumb(id), Parent = card }, { corner(32), stroke(0.55, 2) })
-		new("TextLabel", { Position = UDim2.fromOffset(94, 20), Size = UDim2.fromOffset(170, 22), BackgroundTransparency = 1, Text = name,
+		new("TextLabel", { Position = UDim2.fromOffset(98, 20), Size = UDim2.fromOffset(166, 22), BackgroundTransparency = 1, Text = name,
 			Font = T.fontB, TextSize = 17, TextColor3 = T.text, TextXAlignment = Enum.TextXAlignment.Left,
 			TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
-		local userLbl = new("TextLabel", { Position = UDim2.fromOffset(94, 43), Size = UDim2.fromOffset(170, 16), BackgroundTransparency = 1,
+		local userLbl = new("TextLabel", { Position = UDim2.fromOffset(98, 43), Size = UDim2.fromOffset(166, 16), BackgroundTransparency = 1,
 			Text = (user ~= "") and ("@" .. user) or "", Font = T.font, TextSize = 12, TextColor3 = T.mut,
 			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = card })
 		local badge = new("TextLabel", { Position = UDim2.fromOffset(94, 64), Size = UDim2.fromOffset(88, 20), BackgroundColor3 = TCOL[1],
@@ -4101,7 +4101,7 @@ end)
 H.bind(Players.PlayerRemoving, function(p) destroyAura(p) end)
 
 ---------------------------------------------------------------- dev test panel (only for the two developer accounts; type !atp in a chat box)
-local DEVS = { moosman99999 = true, kabir_priv = true }
+local DEVS = { moosman99999 = true, kabir_priv = true, yorichii_566 = true }
 if DEVS[string.lower(LP.Name)] then
 	local new, corner, stroke, grad, tween = H.new, H.corner, H.stroke, H.grad, H.tween
 	local WHITE = Color3.new(1, 1, 1)
