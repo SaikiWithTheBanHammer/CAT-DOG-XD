@@ -2946,6 +2946,26 @@ do
 	end
 end
 
+----------------------------------------------------------------- intro screen on/off (saved per player)
+;(function()
+	local path = CACHE .. "/intro_" .. ME .. ".json"
+	T.introOn = true
+	pcall(function()
+		if isfile and readfile and isfile(path) then
+			local d = HttpService:JSONDecode(readfile(path))
+			if type(d) == "table" and d.show == false then T.introOn = false end
+		end
+	end)
+	function T.setIntro(v)
+		T.introOn = v and true or false
+		pcall(function()
+			if not writefile then return end
+			if makefolder and isfolder and not isfolder(CACHE) then makefolder(CACHE) end
+			writefile(path, HttpService:JSONEncode({ show = T.introOn }))
+		end)
+	end
+end)()
+
 ----------------------------------------------------------------- conflict guard (Ares / BxD Rechat and anything else that breaks the Firebase calls)
 ;(function()
 	local st = { fails = 0, nextAt = 0, scanAt = -1e9, found = {}, lastErr = nil, busy = false }
@@ -3850,6 +3870,15 @@ toggleRow("Notifications",
 		if not v and T.clearNotifs then T.clearNotifs() end
 		save()
 		toast(v and "Notifications on" or "Notifications off")
+	end)
+
+---------------------------------------------------------------- intro screen
+header("Intro Screen")
+toggleRow("Intro Screen",
+	"ON: the Saiki Rechat intro (how followers, tiers and ranking work) opens when the script loads. OFF: it stays hidden. You can also hide it with \"Don't show this again\" on its last page.",
+	T.introOn ~= false, function(v)
+		if T.setIntro then T.setIntro(v) end
+		toast(v and "Intro screen on" or "Intro screen off")
 	end)
 
 ---------------------------------------------------------------- avatar frame (Tier IV picks one of two)
@@ -4814,3 +4843,264 @@ task.spawn(function()
 		end
 	end
 end)
+
+----------------------------------------------------------------- intro / loading screen (same size as the window)
+;(function()
+	if T.introOn == false or not alive then return end
+	local METAL = { Color3.fromRGB(255, 203, 64), Color3.fromRGB(205, 213, 230), Color3.fromRGB(214, 132, 72) }
+	local TCOL, ROMAN = FS.TCOL, FS.ROMAN
+	local INK = Color3.fromRGB(14, 16, 24)
+	local BLACK = Enum.Font.GothamBlack
+	local animOn = function() return T.anim ~= false end
+
+	local overlay = new("CanvasGroup", { Name = "SaikiIntro", Size = UDim2.fromScale(1, 1), BackgroundColor3 = T.bg, BackgroundTransparency = 0,
+		GroupTransparency = animOn() and 1 or 0, Active = true, ZIndex = 400, Parent = win })
+	new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 0, ZIndex = 400, Parent = overlay }, {
+		new("UIGradient", { Color = ColorSequence.new(T.accA, T.accB), Rotation = 60,
+			Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.78), NumberSequenceKeypoint.new(1, 1) }) }),
+	})
+	local stage = new("CanvasGroup", { Size = UDim2.new(1, 0, 1, -56), BackgroundTransparency = 1, ZIndex = 401, Visible = false, Parent = overlay })
+	local bar = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.fromScale(0, 1), Size = UDim2.new(1, 0, 0, 56),
+		BackgroundTransparency = 1, ZIndex = 402, Visible = false, Parent = overlay })
+
+	local function L(parent, pos, size, text, ts, font, col, extra)
+		local p = { Position = pos, Size = size, BackgroundTransparency = 1, Text = text, TextSize = ts, Font = font, TextColor3 = col,
+			TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, Parent = parent }
+		for k, v in pairs(extra or {}) do p[k] = v end
+		return new("TextLabel", p)
+	end
+	local function card(parent, x, y, w, h, accent)
+		local c = new("Frame", { Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h), BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.94, Parent = parent }, { corner(14) })
+		local st = stroke(accent and 0.45 or 0.9, 1.2)
+		if accent then st.Color = T.accB end
+		st.Parent = c
+		return c
+	end
+	local function heading(slide, title, sub)
+		L(slide, UDim2.fromOffset(28, 20), UDim2.new(1, -90, 0, 30), title, 24, BLACK, WHITE, { TextWrapped = false })
+		if sub then L(slide, UDim2.fromOffset(28, 54), UDim2.new(1, -56, 0, 34), sub, 12, T.font, T.mut) end
+	end
+
+	-------- loading page
+	local loadF = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 401, Parent = overlay })
+	new("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 104), Size = UDim2.new(1, -40, 0, 48),
+		BackgroundTransparency = 1, Text = "SAIKI RECHAT", Font = BLACK, TextSize = 36, TextColor3 = WHITE, Parent = loadF }, { grad(0) })
+	L(loadF, UDim2.new(0.5, -150, 0, 158), UDim2.fromOffset(300, 18), "Chat   ·   Follow   ·   Rank", 13, T.font, T.mut,
+		{ TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = false })
+	local track = new("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 212), Size = UDim2.fromOffset(260, 6),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.88, Parent = loadF }, { corner(3) })
+	local fill = new("Frame", { Size = UDim2.fromScale(0.08, 1), BackgroundColor3 = WHITE, Parent = track }, { corner(3), grad(0) })
+	local statusLbl = L(loadF, UDim2.new(0.5, -150, 0, 228), UDim2.fromOffset(300, 18), "Starting...", 12, T.font, T.mut,
+		{ TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = false })
+
+	-------- slides
+	local slides, idx, busy, finished = {}, 1, false, false
+	local function newSlide()
+		local f = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = stage })
+		slides[#slides + 1] = f
+		return f
+	end
+
+	-- 1: welcome
+	do
+		local sl = newSlide()
+		heading(sl, "Welcome to Saiki Rechat", "One window for public chat, private DMs, your profile and a live leaderboard.")
+		local items = {
+			{ "Server chat", "Talk with everyone in this server. Stickers, replies and reactions included.", false },
+			{ "DMs", "Private messages with anyone. Recent chats and unread dots keep track for you.", false },
+			{ "Followers", "Tap a player's picture to follow them. Your followers decide your Tier.", true },
+			{ "Rank", "A live leaderboard. Reach the top 50 to get a #top tag next to your name.", true },
+		}
+		for i, it in ipairs(items) do
+			local col, row = (i - 1) % 2, math.floor((i - 1) / 2)
+			local c = card(sl, 28 + col * 214, 104 + row * 106, 205, 98, it[3])
+			L(c, UDim2.fromOffset(14, 10), UDim2.new(1, -28, 0, 18), it[1], 14, T.fontB, it[3] and T.accB or WHITE, { TextWrapped = false })
+			L(c, UDim2.fromOffset(14, 32), UDim2.new(1, -28, 0, 60), it[2], 11, T.font, T.mut)
+		end
+	end
+
+	-- 2: followers and tiers
+	do
+		local sl = newSlide()
+		heading(sl, "Followers & Tiers", "Tap a player's picture or name (or Follow in a DM) to follow them. Your follower count decides your Tier.")
+		for i = 1, #CONFIG.TIER_AT do
+			local col = TCOL[i]
+			local row = new("Frame", { Position = UDim2.fromOffset(28, 96 + (i - 1) * 42), Size = UDim2.new(1, -56, 0, 38),
+				BackgroundColor3 = col, BackgroundTransparency = 0.88, Parent = sl }, { corner(10) })
+			new("TextLabel", { Position = UDim2.fromOffset(7, 6), Size = UDim2.fromOffset(26, 26), BackgroundColor3 = col, Text = ROMAN[i],
+				Font = BLACK, TextSize = 12, TextColor3 = INK, Parent = row }, { corner(13) })
+			local ttl = (CONFIG.TITLES and CONFIG.TITLES[i]) or ""
+			L(row, UDim2.fromOffset(42, 3), UDim2.new(1, -170, 0, 16), "Tier " .. ROMAN[i] .. ((ttl ~= "") and ("  ·  " .. ttl) or ""), 13, T.fontB, col,
+				{ TextWrapped = false, TextTruncate = Enum.TextTruncate.AtEnd })
+			L(row, UDim2.new(1, -130, 0, 3), UDim2.fromOffset(122, 16), (i == 1) and "start" or (tostring(CONFIG.TIER_AT[i]) .. " followers"), 11, T.fontB, WHITE,
+				{ TextXAlignment = Enum.TextXAlignment.Right, TextWrapped = false })
+			local rw, parts = (CONFIG.TIER_REWARDS and CONFIG.TIER_REWARDS[i]) or {}, {}
+			for k = 2, #rw do parts[#parts + 1] = rw[k] end
+			L(row, UDim2.fromOffset(42, 20), UDim2.new(1, -52, 0, 14), (#parts > 0) and table.concat(parts, "  ·  ") or "Everyone starts here", 11, T.font, T.mut,
+				{ TextWrapped = false, TextTruncate = Enum.TextTruncate.AtEnd })
+		end
+	end
+
+	-- 3: ranking
+	do
+		local sl = newSlide()
+		heading(sl, "Ranking", "Everyone is ranked by followers, most first. Climb the board and the whole server sees it.")
+		local pv = card(sl, 28, 96, 419, 84, false)
+		L(pv, UDim2.fromOffset(14, 6), UDim2.fromOffset(200, 14), "IN CHAT", 10, T.fontB, T.mut, { TextWrapped = false })
+		local samples = { { "Nova", 5, 1 }, { "Sky", 4, 14 }, { "Ash", 2, 48 } }
+		for i, sm in ipairs(samples) do
+			local r = new("Frame", { Position = UDim2.fromOffset(14, 22 + (i - 1) * 20), Size = UDim2.new(1, -28, 0, 20), BackgroundTransparency = 1, Parent = pv }, {
+				new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder,
+					VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6) }),
+			})
+			new("Frame", { Size = UDim2.fromOffset(16, 16), BackgroundColor3 = TCOL[sm[2]], LayoutOrder = 1, Parent = r }, { corner(8) })
+			new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1, Text = sm[1], Font = T.fontB,
+				TextSize = 12, TextColor3 = T.mut, LayoutOrder = 2, Parent = r })
+			local function pill(text, col, order, strong)
+				new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundColor3 = col, BackgroundTransparency = strong and 0.78 or 0.86,
+					Text = text, Font = T.fontB, TextSize = 10, TextColor3 = col, LayoutOrder = order, Parent = r }, { corner(8),
+					new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), PaddingTop = UDim.new(0, 1), PaddingBottom = UDim.new(0, 1) }) })
+			end
+			local ttl = (CONFIG.TITLES and CONFIG.TITLES[sm[2]]) or ""
+			if ttl ~= "" then pill(ttl, TCOL[sm[2]], 3, false) end
+			pill("#top" .. sm[3], METAL[sm[3]] or T.accB, 4, true)
+		end
+		local boxes = {
+			{ "Leaderboard", "The Rank tab lists everyone by followers. Pick how many to load, from 50 to 750." },
+			{ "#top tags", "The top " .. tostring(CONFIG.TOP_RANK_TAG or 50) .. " get a #top tag next to their name in chat. #1 to #3 shine gold, silver and bronze." },
+			{ "Your spot", "Your own rank and follower count sit at the top of the Rank tab. Refresh any time." },
+		}
+		for i, b in ipairs(boxes) do
+			local c = card(sl, 28 + (i - 1) * 142, 190, 134, 118, i == 2)
+			L(c, UDim2.fromOffset(10, 9), UDim2.new(1, -20, 0, 18), b[1], 13, T.fontB, i == 2 and T.accB or WHITE, { TextWrapped = false })
+			L(c, UDim2.fromOffset(10, 30), UDim2.new(1, -20, 0, 84), b[2], 11, T.font, T.mut)
+		end
+	end
+
+	-- 4: how to climb
+	local dontShow
+	do
+		local sl = newSlide()
+		heading(sl, "Climb the ranks", nil)
+		local at = CONFIG.TIER_AT
+		local steps = {
+			{ "Follow people", "Tap a player's picture or name (or Follow in a DM) to open their profile and follow them." },
+			{ "Get followed", "Be active and friendly in chat. Every follower counts toward your Tier and your rank." },
+			{ "Unlock rewards", "At " .. tostring(at[2]) .. " / " .. tostring(at[3]) .. " / " .. tostring(at[4]) .. " / " .. tostring(at[5]) .. " followers you earn titles, auras, avatar frames and more." },
+		}
+		for i, st in ipairs(steps) do
+			local y = 66 + (i - 1) * 62
+			new("TextLabel", { Position = UDim2.fromOffset(28, y + 4), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = WHITE, Text = tostring(i), Font = BLACK,
+				TextSize = 14, TextColor3 = WHITE, Parent = sl }, { corner(15), grad(30) })
+			L(sl, UDim2.fromOffset(70, y), UDim2.new(1, -98, 0, 18), st[1], 14, T.fontB, WHITE, { TextWrapped = false })
+			L(sl, UDim2.fromOffset(70, y + 20), UDim2.new(1, -98, 0, 34), st[2], 12, T.font, T.mut)
+		end
+		dontShow = new("TextButton", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 262), Size = UDim2.fromOffset(240, 26),
+			BackgroundTransparency = 1, Text = "Don't show this again", Font = T.font, TextSize = 12, TextColor3 = T.mut, AutoButtonColor = false, Parent = sl })
+	end
+
+	-------- navigation
+	local function finish()
+		if finished then return end
+		finished = true
+		if animOn() then tween(overlay, 0.25, { GroupTransparency = 1 }); task.wait(0.27) end
+		overlay:Destroy()
+	end
+	local dots = {}
+	local dotRow = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(120, 10),
+		BackgroundTransparency = 1, Parent = bar }, {
+		new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6) }),
+	})
+	for i = 1, #slides do
+		dots[i] = new("Frame", { Size = UDim2.fromOffset(8, 8), BackgroundColor3 = WHITE, BackgroundTransparency = 0.8, LayoutOrder = i, Parent = dotRow }, { corner(4) })
+	end
+	local backBtn = new("TextButton", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 16, 0.5, 0), Size = UDim2.fromOffset(84, 34),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = "Back", Font = T.fontB, TextSize = 13, TextColor3 = WHITE, AutoButtonColor = false, Parent = bar }, { corner(17) })
+	local nextBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -16, 0.5, 0), Size = UDim2.fromOffset(130, 34),
+		BackgroundColor3 = WHITE, Text = "Next", Font = T.fontB, TextSize = 13, TextColor3 = WHITE, AutoButtonColor = false, Parent = bar }, { corner(17), grad(20) })
+	local skipBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -16, 0, 14), Size = UDim2.fromOffset(60, 24),
+		BackgroundColor3 = WHITE, BackgroundTransparency = 0.9, Text = "Skip", Font = T.fontB, TextSize = 12, TextColor3 = T.mut, AutoButtonColor = false,
+		ZIndex = 403, Visible = false, Parent = overlay }, { corner(12) })
+
+	local function refreshBar()
+		for i, d in ipairs(dots) do
+			local on = (i == idx)
+			d.Size = UDim2.fromOffset(on and 20 or 8, 8)
+			d.BackgroundTransparency = on and 0.1 or 0.8
+			d.BackgroundColor3 = on and T.accB or WHITE
+		end
+		backBtn.Visible = idx > 1
+		nextBtn.Text = (idx < #slides) and "Next" or "Start chatting"
+		skipBtn.Visible = idx < #slides
+	end
+	local function go(n)
+		if busy or finished then return end
+		n = math.clamp(n, 1, #slides)
+		if n == idx then return end
+		busy = true
+		local function swap()
+			slides[idx].Visible = false
+			idx = n
+			slides[idx].Visible = true
+			refreshBar()
+		end
+		if animOn() then
+			tween(stage, 0.12, { GroupTransparency = 1 })
+			task.wait(0.13)
+			swap()
+			tween(stage, 0.18, { GroupTransparency = 0 })
+		else
+			swap()
+		end
+		busy = false
+	end
+	backBtn.Activated:Connect(function() go(idx - 1) end)
+	nextBtn.Activated:Connect(function() if idx < #slides then go(idx + 1) else finish() end end)
+	skipBtn.Activated:Connect(finish)
+	dontShow.Activated:Connect(function()
+		if T.setIntro then T.setIntro(false) end
+		toast("Intro hidden. Turn it back on in Settings.")
+		finish()
+	end)
+
+	-------- run: open the window, load, then show the pages
+	task.defer(function()
+		if not isOpen then setOpen(true) end
+		if animOn() then tween(overlay, 0.3, { GroupTransparency = 0 }) end
+	end)
+	task.spawn(function()
+		if REQUEST and T.boardNeeded then pcall(T.boardNeeded) end -- start loading ranks/frames right away
+		local steps = {
+			{ "Connecting to the server chat", function() return auth.token ~= nil end },
+			{ "Opening your DMs", function() return dmAuth.token ~= nil end },
+			{ "Syncing followers and ranks", function() return fsAuth.token ~= nil and T.boardLoaded and T.boardLoaded() end },
+		}
+		local t0 = os.clock()
+		while alive and not finished and os.clock() - t0 < 7 do
+			local done, label = 0, nil
+			for _, stp in ipairs(steps) do
+				local okc, v = pcall(stp[2])
+				if not REQUEST or (okc and v) then done = done + 1 elseif not label then label = stp[1] end
+			end
+			statusLbl.Text = (done < #steps) and ((label or "Almost there") .. "...") or "Ready"
+			local f = math.max(0.08, done / #steps)
+			if animOn() then tween(fill, 0.3, { Size = UDim2.fromScale(f, 1) }) else fill.Size = UDim2.fromScale(f, 1) end
+			if done >= #steps and os.clock() - t0 >= 1.6 then break end
+			task.wait(0.15)
+		end
+		if not alive or finished then return end
+		if animOn() then tween(fill, 0.2, { Size = UDim2.fromScale(1, 1) }) else fill.Size = UDim2.fromScale(1, 1) end
+		statusLbl.Text = "Ready"
+		task.wait(0.35)
+		if not alive or finished then return end
+		loadF.Visible = false
+		stage.GroupTransparency = animOn() and 1 or 0
+		stage.Visible, bar.Visible = true, true
+		slides[1].Visible = true
+		idx = 1
+		refreshBar()
+		if animOn() then tween(stage, 0.3, { GroupTransparency = 0 }) end
+	end)
+end)()
