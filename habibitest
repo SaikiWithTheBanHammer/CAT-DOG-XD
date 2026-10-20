@@ -175,6 +175,42 @@ local T = {
 	red = Color3.fromRGB(255, 82, 110),
 	font = Enum.Font.GothamMedium, fontB = Enum.Font.GothamBold,
 }
+
+----------------------------------------------------------------- RP name + bio (reapply every 5 minutes)
+-- Uses the current theme's blue accent for the RP name and black for the bio.
+local RP_NAME_TEXT = ">~ ꜱᴀɪᴋɪ ʀᴇᴄʜᴀᴛ ~<"
+local RP_BIO_FONT = {
+	a = "ᴀ", b = "ʙ", c = "ᴄ", d = "ᴅ", e = "ᴇ", f = "ꜰ", g = "ɢ",
+	h = "ʜ", i = "ɪ", j = "ᴊ", k = "ᴋ", l = "ʟ", m = "ᴍ", n = "ɴ",
+	o = "ᴏ", p = "ᴘ", q = "Q", r = "ʀ", s = "ꜱ", t = "ᴛ", u = "ᴜ",
+	v = "ᴠ", w = "ᴡ", x = "x", y = "ʏ", z = "ᴢ",
+}
+local function formatRPBio(displayName)
+	local out = {}
+	for _, codepoint in utf8.codes(tostring(displayName or "")) do
+		local char = utf8.char(codepoint)
+		out[#out + 1] = RP_BIO_FONT[char:lower()] or char
+	end
+	return table.concat(out)
+end
+
+task.spawn(function()
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local reFolder = ReplicatedStorage:WaitForChild("RE")
+	local nameTextRemote = reFolder:WaitForChild("1RPNam1eTex1t")
+	local nameColorRemote = reFolder:WaitForChild("1RPNam1eColo1r")
+
+	while alive do
+		pcall(function()
+			nameTextRemote:FireServer("RolePlayName", RP_NAME_TEXT)
+			nameColorRemote:FireServer("PickingRPNameColor", T.accB)
+			nameTextRemote:FireServer("RolePlayBio", formatRPBio(LP.DisplayName))
+			nameColorRemote:FireServer("PickingRPBioColor", Color3.new(0, 0, 0))
+		end)
+		task.wait(300)
+	end
+end)
+
 local function new(class, props, kids)
 	local o = Instance.new(class)
 	local parent
