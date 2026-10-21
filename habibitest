@@ -538,12 +538,36 @@ local function loadBanList()
 end
 local function isBanned() return banned[LP.UserId] or (MY_HWID and bannedHwid[MY_HWID]) or false end
 
--- baseline of the 4 credentials taken at launch
+-- baseline of all 4 identity fields taken at launch
 local base = { name = LP.Name, id = LP.UserId, dn = LP.DisplayName, age = LP.AccountAge }
 
--- check 1: did any of the 4 values change locally since launch?
+-- DisplayName is still checked, but a REAL rename must not look like spoofing. Roblox itself is the authority:
+-- the display name must match the web API or the engine's UserService (either one confirms it, so a lagging cache
+-- on one side can't cause a false kick). true = confirmed, false = reachable sources contradict it, nil = couldn't check.
+local function displayConfirmed(apiDisplay)
+	local reachable = false
+	if apiDisplay ~= nil then
+		reachable = true
+		if tostring(apiDisplay) == LP.DisplayName then return true end
+	end
+	local ok, infos = pcall(function() return game:GetService("UserService"):GetUserInfosByUserIdsAsync({ LP.UserId }) end)
+	if ok and type(infos) == "table" and infos[1] then
+		reachable = true
+		if tostring(infos[1].DisplayName) == LP.DisplayName then return true end
+	end
+	if reachable then return false end
+	return nil
+end
+
+-- check 1: did any of the 4 values change locally since launch? (a display name change only counts if Roblox doesn't confirm it)
 local function localDrift()
-	return LP.Name ~= base.name or LP.UserId ~= base.id or LP.DisplayName ~= base.dn or LP.AccountAge ~= base.age
+	if LP.Name ~= base.name or LP.UserId ~= base.id or LP.AccountAge ~= base.age then return true end
+	if LP.DisplayName ~= base.dn then
+		local c = displayConfirmed(nil)
+		if c == true then base.dn = LP.DisplayName -- genuine rename: accept it as the new baseline
+		elseif c == false then return true end
+	end
+	return false
 end
 
 -- extra anchors: Roblox's own player lookups don't use the properties a spoofer edits
@@ -561,7 +585,7 @@ local function apiCheck(withDisplay)
 	if not ok or type(d) ~= "table" or not d.id then return nil end
 	if tonumber(d.id) ~= LP.UserId then return false end
 	if tostring(d.name):lower() ~= LP.Name:lower() then return false end
-	if withDisplay and tostring(d.displayName) ~= LP.DisplayName then return false end
+	if withDisplay and tostring(d.displayName) ~= LP.DisplayName and displayConfirmed(d.displayName) == false then return false end
 	local okT, dt = pcall(DateTime.fromIsoDate, tostring(d.created))
 	if okT and dt then
 		local days = math.floor((os.time() - dt.UnixTimestamp) / 86400)
@@ -585,7 +609,7 @@ if isBanned() then kick(KICK_BAN); do return end end
 do
 	local strikes, verdict = 0, "unknown"
 	for _ = 1, 4 do
-		verdict = checkIdentity(true) -- full 4-field API comparison at launch
+		verdict = checkIdentity(true) -- verify stable identity fields at launch
 		if verdict == "spoof" then kick(KICK_SPOOF); do return end end
 		if verdict == "mismatch" then
 			strikes += 1
@@ -1264,6 +1288,7 @@ do
 			if not st.warned then
 				st.warned = true
 				warn("[SAIKI RECHAT] DM identity not registered (" .. tostring(why) .. "). Publish the new sxkidirect rules; if this Roblox id was linked to another DM login, delete /users/" .. ME .. " in the Firebase console.")
+				if T.notify then T.notify("dmid", "DMs not linked yet", "New DMs can't reach you until your DM login is linked. Details are in the F9 console.") end
 			end
 		end
 		return good
@@ -1439,6 +1464,38 @@ local function resolveName(pid)
 		if ok and nm then e.n, e.u = nm, nm end
 	end
 	indexDirty = true
+end
+-- A changed display name must reach everyone's Recent list: re-check a couple of recent names every ~30s
+-- (UserId-based threads never change; only the label does). Returns true when something changed.
+local function refreshNames()
+	local now, checked, changed = os.time(), 0, false
+	for pid, e in pairs(index) do
+		if checked >= 2 then break end
+		if e.l and (not e.nt or now - e.nt > 1800) then
+			checked += 1
+			e.nt = now
+			local dn, un
+			local pl = Players:GetPlayerByUserId(tonumber(pid) or 0)
+			if pl then
+				dn, un = pl.DisplayName, pl.Name
+			else
+				local d = directory[pid]
+				if d and d.d ~= "" then dn, un = d.d, d.n end
+				local ok, res = requestJSON("GET", "https://users.roblox.com/v1/users/" .. pid) -- Roblox is the source of truth
+				if ok and type(res) == "table" and type(res.name) == "string" then
+					dn = (type(res.displayName) == "string" and res.displayName ~= "") and res.displayName or res.name
+					un = res.name
+				end
+			end
+			if dn and dn ~= "" and (dn ~= e.n or (un and un ~= "" and un ~= e.u)) then
+				e.n = cut(dn, 40)
+				if un and un ~= "" then e.u = cut(un, 40) end
+				changed = true
+			end
+			indexDirty = true
+		end
+	end
+	return changed
 end
 
 local dm = { partner = nil, name = "" }
@@ -1923,6 +1980,7 @@ local function pollInbox()
 		if not T.inboxWarned then
 			T.inboxWarned = true
 			warn("[SAIKI RECHAT] couldn't read your DM inbox (HTTP " .. tostring(code) .. "). New DMs won't show in Recent until this works; publish the latest sxkidirect rules.")
+			if T.notify then T.notify("dminbox", "Can't read your DMs", "New DMs won't show until this works (HTTP " .. tostring(code) .. "). See the F9 console.") end
 		end
 		return
 	end
@@ -2460,7 +2518,7 @@ end
 	local lcache = {}
 	local function lookup(rid)
 		local c = lcache[rid]
-		if c then return c[1], c[2] end
+		if c and rid ~= ME and os.time() - (c[3] or 0) < 1800 then return c[1], c[2] end
 		local dn, un = nameOf(rid)
 		if not dn then
 			local okp, pd = FS.req("GET", "/profiles/" .. rid)
@@ -2481,7 +2539,7 @@ end
 			end
 		end
 		dn, un = dn or ("User " .. rid), un or ""
-		lcache[rid] = { dn, un }
+		lcache[rid] = { dn, un, os.time() }
 		return dn, un
 	end
 	----------------------------------------------------------------- profile popup (tap an avatar / name / ranking row)
@@ -3391,8 +3449,15 @@ end)()
 ----------------------------------------------------------------- scheduler (one loop for everything)
 task.spawn(function()
 	local n = 0
+	local lastProfileDisplayName = LP.DisplayName
 	while alive do
 		n += 1
+		-- A changed DisplayName updates profile metadata only; UserId-based relationships stay intact.
+		if LP.DisplayName ~= lastProfileDisplayName then
+			lastProfileDisplayName = LP.DisplayName
+			task.spawn(writeMyProfile)
+			if FS and FS.writeProfile then task.spawn(FS.writeProfile) end
+		end
 		if CONFIG.HIDE_ROBLOX_CHAT and n % 2 == 1 then setRbxChat(false) end
 		if REQUEST then
 			if (isOpen and cur == 1) or n % 3 == 0 then pollStream(serverStream, serverHandler) end
@@ -3403,6 +3468,7 @@ task.spawn(function()
 				if s == dmStream and n % 2 == 0 then pollReactions(s.rpath, dmAuth, DM_FIREBASE_DB, views.dm) end
 			end
 			if n % 3 == 1 then pollInbox() end                 -- ~7.5s: ONE small request tells me who messaged
+			if n % 12 == 8 and refreshNames() and home.Visible and isOpen and cur == 2 then refreshHome() end -- ~30s: keep Recent names current
 			if n == 2 and not legacyDone then discoverLegacy() end -- once per install
 			if n == 3 or n % 360 == 0 then syncDirectory() end -- Saiki users list (only changes since last sync)
 			if n == 4 then task.spawn(writeMyProfile) end
@@ -3503,7 +3569,7 @@ pcall(function()
 		if type(d) == "table" and type(d.names) == "table" then
 			for id, v in pairs(d.names) do
 				if type(v) == "table" and type(v.d) == "string" and type(v.u) == "string" and os.time() - (tonumber(v.t) or 0) < 604800 then
-					names[id] = { dn = v.d, un = v.u, keep = true }
+					names[id] = { dn = v.d, un = v.u, keep = true, t = tonumber(v.t) or 0 }
 				end
 			end
 		end
@@ -3690,6 +3756,23 @@ end
 -- names: /profiles first, Roblox lookup as fallback
 local function resolve(e)
 	local nm = names[e.id]
+	local live = (e.id == H.me) and Players.LocalPlayer or Players:GetPlayerByUserId(tonumber(e.id) or 0)
+	if live then -- live name from the game itself, never stale
+		if not nm or nm.dn ~= live.DisplayName or nm.un ~= live.Name then namesDirty = true end
+		nm = { dn = live.DisplayName, un = live.Name, keep = true, t = os.time() }
+		names[e.id] = nm
+		e.dn, e.un = nm.dn, nm.un
+		return
+	end
+	-- Refresh cached display names from Roblox periodically; keep the cached value if the API is unavailable.
+	if nm and os.time() - (tonumber(nm.t) or 0) > 300 then
+		local fresh = apiName(e.id)
+		if fresh then
+			fresh.keep, fresh.t = true, os.time()
+			if fresh.dn ~= nm.dn or fresh.un ~= nm.un or fresh.t ~= nm.t then namesDirty = true end
+			names[e.id], nm = fresh, fresh
+		end
+	end
 	if not nm then
 		local pl = Players:GetPlayerByUserId(tonumber(e.id) or 0)
 		if pl then nm = { dn = pl.DisplayName, un = pl.Name, keep = true, t = os.time() } end
@@ -4911,7 +4994,7 @@ task.spawn(function()
 		task.wait(CONFIG.IDENTITY_INTERVAL)
 		if not alive then break end
 		rounds += 1
-		local r = checkIdentity(false) -- display name is only compared with the API at launch
+		local r = checkIdentity(false) -- display name: baseline check every round, web API comparison at launch
 		if r == "spoof" then
 			kick(KICK_SPOOF); Destroy(); break
 		elseif r == "mismatch" then
