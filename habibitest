@@ -91,49 +91,49 @@ local CONFIG = {
 	},
 	TIER_FRAMES = { [2] = "t2", [3] = "t3", [4] = { "t4a", "t4b" }, [5] = "t5" }, -- tier -> frame (a list = the player picks one in Settings)
 	FRAME_USERS = {},                 -- secret frames for specific players: [robloxUserId] = "rose" or "cursed" or "demon" or "x_<id>" (Frames2-Custom, see FRAMES2)
-	-- secret custom frames: github.com/SaikiWithTheBanHammer/Frames2-Custom  (key = "x_" .. id). Hole measures were auto-detected;
-	-- testers fine-tune them in the !atp panel (Frames lab) and export the final numbers.
+	-- secret custom frames: github.com/SaikiWithTheBanHammer/Frames2-Custom  (key = "x_" .. id). Hole measures are the final numbers
+	-- exported by a tester from the !atp panel (Frames lab).
 	FRAMES2_REPO = "Frames2-Custom",
 	FRAMES2 = {
-		{ id = "Frame1", file = "Frame1.png", w = 447, h = 559, cx = 224.5, cy = 282.4, r = 141.3 },
-		{ id = "FrameA", file = "FrameA-removebg-preview.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
-		{ id = "FrameB", file = "FrameB-removebg-preview.png", w = 447, h = 447, cx = 227.4, cy = 217.3, r = 142.1 },
-		{ id = "FrameC", file = "FrameC-removebg-preview.png", w = 318, h = 318, cx = 159.0, cy = 159.0, r = 95.4 }, -- hole not auto-detected: starting guess
-		{ id = "FrameD", file = "FrameD-removebg-preview.png", w = 500, h = 500, cx = 251.1, cy = 238.6, r = 153.7 },
-		{ id = "FrameE", file = "FrameE-removebg-preview(1).png", w = 500, h = 500, cx = 262.6, cy = 242.7, r = 172.0 },
-		{ id = "FrameF", file = "FrameF-removebg-preview.png", w = 360, h = 360, cx = 178.7, cy = 170.2, r = 88.8 },
-		{ id = "FrameG", file = "FrameG-removebg-preview.png", w = 400, h = 420, cx = 205.1, cy = 198.6, r = 88.8 },
-		{ id = "FrameH", file = "FrameH-removebg-preview.png", w = 205, h = 246, cx = 103.7, cy = 116.2, r = 65.8 },
-		{ id = "FrameI", file = "FrameI-removebg-preview.png", w = 360, h = 360, cx = 179.5, cy = 174.7, r = 85.2 },
-		{ id = "FrameJ", file = "FrameJ-removebg-preview.png", w = 400, h = 400, cx = 199.4, cy = 196.6, r = 106.6 },
-		{ id = "SilverFrame", file = "SilverFrame-removebg-preview.png", w = 400, h = 407, cx = 194.2, cy = 208.2, r = 131.2 },
-		{ id = "frame10", file = "frame10.png", w = 480, h = 499, cx = 240.1, cy = 255.4, r = 150.7 },
-		{ id = "frame11", file = "frame11.png", w = 500, h = 500, cx = 271.0, cy = 249.3, r = 162.4 },
-		{ id = "frame12", file = "frame12.png", w = 500, h = 500, cx = 245.2, cy = 240.2, r = 146.3 },
-		{ id = "frame13", file = "frame13.png", w = 500, h = 500, cx = 262.8, cy = 235.5, r = 166.6 },
-		{ id = "frame14", file = "frame14.png", w = 500, h = 500, cx = 247.8, cy = 253.2, r = 171.7 },
-		{ id = "frame15", file = "frame15.png", w = 500, h = 500, cx = 257.5, cy = 217.2, r = 133.6 },
-		{ id = "frame16", file = "frame16.png", w = 500, h = 500, cx = 272.7, cy = 267.1, r = 149.6 },
-		{ id = "frame17", file = "frame17.png", w = 500, h = 500, cx = 250.9, cy = 252.3, r = 120.5 },
-		{ id = "frame18", file = "frame18.png", w = 501, h = 498, cx = 252.2, cy = 236.9, r = 159.3 },
-		{ id = "frame19", file = "frame19.png", w = 342, h = 342, cx = 166.0, cy = 179.4, r = 128.3 },
-		{ id = "frame2", file = "frame2.png", w = 500, h = 500, cx = 251.9, cy = 235.5, r = 123.7 },
-		{ id = "frame20", file = "frame20.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
-		{ id = "frame21", file = "frame21.png", w = 500, h = 500, cx = 253.1, cy = 240.0, r = 129.9 },
-		{ id = "frame22", file = "frame22.png", w = 500, h = 500, cx = 250.9, cy = 252.3, r = 120.5 },
-		{ id = "frame23", file = "frame23.png", w = 500, h = 500, cx = 260.5, cy = 250.9, r = 153.3 },
-		{ id = "frame24", file = "frame24.png", w = 500, h = 500, cx = 275.6, cy = 243.1, r = 164.2 },
-		{ id = "frame25", file = "frame25.jph.png", w = 342, h = 342, cx = 171.4, cy = 172.0, r = 120.7 },
-		{ id = "frame26", file = "frame26.png", w = 500, h = 500, cx = 255.0, cy = 228.9, r = 93.5 },
-		{ id = "frame28", file = "frame28.png", w = 500, h = 500, cx = 251.1, cy = 255.8, r = 147.9 },
-		{ id = "frame29", file = "frame29.png", w = 500, h = 500, cx = 238.1, cy = 241.0, r = 124.9 },
-		{ id = "frame30", file = "frame30.png", w = 500, h = 500, cx = 249.9, cy = 272.2, r = 145.0 },
-		{ id = "frame31", file = "frame31.png", w = 523, h = 477, cx = 274.8, cy = 235.7, r = 136.6 },
-		{ id = "frame32", file = "frame32.png", w = 509, h = 490, cx = 257.1, cy = 228.7, r = 140.6 },
-		{ id = "frame8", file = "frame8.png", w = 360, h = 360, cx = 171.8, cy = 170.9, r = 115.5 },
-		{ id = "frame9", file = "frame9.png", w = 500, h = 500, cx = 249.1, cy = 255.5, r = 164.9 },
-		{ id = "frames7", file = "frames7.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
-		{ id = "golddragon", file = "golddragon.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 150.0 }, -- hole not auto-detected: starting guess
+		{ id = "Frame1", file = "Frame1.png", w = 447, h = 559, cx = 226.1, cy = 282.4, r = 150.3 },
+		{ id = "FrameA", file = "FrameA-removebg-preview.png", w = 500, h = 500, cx = 246.5, cy = 250.0, r = 164.8 },
+		{ id = "FrameB", file = "FrameB-removebg-preview.png", w = 447, h = 447, cx = 227.4, cy = 217.3, r = 156.2 },
+		{ id = "FrameC", file = "FrameC-removebg-preview.png", w = 318, h = 318, cx = 159.0, cy = 159.0, r = 122.3 },
+		{ id = "FrameD", file = "FrameD-removebg-preview.png", w = 500, h = 500, cx = 251.1, cy = 238.6, r = 183.0 },
+		{ id = "FrameE", file = "FrameE-removebg-preview(1).png", w = 500, h = 500, cx = 262.6, cy = 242.7, r = 184.9 },
+		{ id = "FrameF", file = "FrameF-removebg-preview.png", w = 360, h = 360, cx = 178.7, cy = 170.2, r = 104.5 },
+		{ id = "FrameG", file = "FrameG-removebg-preview.png", w = 400, h = 420, cx = 205.1, cy = 198.6, r = 115.3 },
+		{ id = "FrameH", file = "FrameH-removebg-preview.png", w = 205, h = 246, cx = 103.7, cy = 116.2, r = 70.8 },
+		{ id = "FrameI", file = "FrameI-removebg-preview.png", w = 360, h = 360, cx = 179.5, cy = 174.7, r = 109.2 },
+		{ id = "FrameJ", file = "FrameJ-removebg-preview.png", w = 400, h = 400, cx = 199.4, cy = 196.6, r = 126.9 },
+		{ id = "SilverFrame", file = "SilverFrame-removebg-preview.png", w = 400, h = 407, cx = 194.2, cy = 208.2, r = 138.1 },
+		{ id = "frame10", file = "frame10.png", w = 480, h = 499, cx = 240.1, cy = 255.4, r = 163.8 },
+		{ id = "frame11", file = "frame11.png", w = 500, h = 500, cx = 271.0, cy = 249.3, r = 178.5 },
+		{ id = "frame12", file = "frame12.png", w = 500, h = 500, cx = 245.2, cy = 240.2, r = 180.6 },
+		{ id = "frame13", file = "frame13.png", w = 500, h = 500, cx = 262.8, cy = 235.5, r = 177.2 },
+		{ id = "frame14", file = "frame14.png", w = 500, h = 500, cx = 247.8, cy = 253.2, r = 184.6 },
+		{ id = "frame15", file = "frame15.png", w = 500, h = 500, cx = 257.5, cy = 217.2, r = 178.1 },
+		{ id = "frame16", file = "frame16.png", w = 500, h = 500, cx = 272.7, cy = 267.1, r = 168.1 },
+		{ id = "frame17", file = "frame17.png", w = 500, h = 500, cx = 250.9, cy = 252.3, r = 147.0 },
+		{ id = "frame18", file = "frame18.png", w = 501, h = 498, cx = 252.2, cy = 236.9, r = 185.2 },
+		{ id = "frame19", file = "frame19.png", w = 342, h = 342, cx = 166.0, cy = 179.4, r = 138.0 },
+		{ id = "frame2", file = "frame2.png", w = 500, h = 500, cx = 251.9, cy = 235.5, r = 152.7 },
+		{ id = "frame20", file = "frame20.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 166.7 },
+		{ id = "frame21", file = "frame21.png", w = 500, h = 500, cx = 253.1, cy = 240.0, r = 146.0 },
+		{ id = "frame22", file = "frame22.png", w = 500, h = 500, cx = 250.9, cy = 252.3, r = 148.8 },
+		{ id = "frame23", file = "frame23.png", w = 500, h = 500, cx = 260.5, cy = 250.9, r = 187.0 },
+		{ id = "frame24", file = "frame24.png", w = 500, h = 500, cx = 275.6, cy = 243.1, r = 190.9 },
+		{ id = "frame25", file = "frame25.jph.png", w = 342, h = 342, cx = 171.4, cy = 172.0, r = 129.8 },
+		{ id = "frame26", file = "frame26.png", w = 500, h = 500, cx = 255.0, cy = 228.9, r = 167.0 },
+		{ id = "frame28", file = "frame28.png", w = 500, h = 500, cx = 251.1, cy = 255.8, r = 162.5 },
+		{ id = "frame29", file = "frame29.png", w = 500, h = 500, cx = 238.1, cy = 241.0, r = 150.5 },
+		{ id = "frame30", file = "frame30.png", w = 500, h = 500, cx = 249.9, cy = 272.2, r = 168.6 },
+		{ id = "frame31", file = "frame31.png", w = 523, h = 477, cx = 274.8, cy = 235.7, r = 172.9 },
+		{ id = "frame32", file = "frame32.png", w = 509, h = 490, cx = 257.1, cy = 228.7, r = 185.0 },
+		{ id = "frame8", file = "frame8.png", w = 360, h = 360, cx = 171.8, cy = 170.9, r = 137.5 },
+		{ id = "frame9", file = "frame9.png", w = 500, h = 500, cx = 249.1, cy = 255.5, r = 198.7 },
+		{ id = "frames7", file = "frames7.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 166.7 },
+		{ id = "golddragon", file = "golddragon.png", w = 500, h = 500, cx = 250.0, cy = 250.0, r = 174.4 },
 	},
 	FRAME_FIT = 0.95,                 -- 1 = the frame's hole is exactly as big as the picture; lower = picture tucks a little under the ring
 	TIER_REWARDS = {                  -- shown in Profile > Progress & Rewards (auras, titles, frames and the !anc command are live)
@@ -2497,9 +2497,9 @@ do
 		local bStamp, bBusy = -1e9, false
 		local reg = {} -- { row = nameRow, id = userId, title = label, rank = label }
 
-		local function pill(parent, order, text, col, strong)
+		local function pill(parent, order, text, col, strong, size)
 			local l = new("TextLabel", { Size = UDim2.new(), AutomaticSize = Enum.AutomaticSize.XY, BackgroundColor3 = col,
-				BackgroundTransparency = strong and 0.78 or 0.86, Text = text, Font = T.fontB, TextSize = 10, TextColor3 = col,
+				BackgroundTransparency = strong and 0.78 or 0.86, Text = text, Font = T.fontB, TextSize = size or 10, TextColor3 = col,
 				LayoutOrder = order, Parent = parent }, { corner(8), new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6),
 				PaddingTop = UDim.new(0, 1), PaddingBottom = UDim.new(0, 1) }) })
 			return l
@@ -2518,8 +2518,14 @@ do
 			end
 			local ct = T.customTitle and T.customTitle[id]
 			if ct and ct ~= "" then
-				if not r.custom then r.custom = pill(r.row, 3, ct, Color3.fromRGB(255, 105, 180), true) end
-				r.custom.Text = ct
+				local cc = Color3.fromRGB(255, 105, 180) -- default pink; moderators can pick another colour with !saikicustomtitle
+				local hx = T.customTitleColor and T.customTitleColor[id]
+				if hx then
+					local okc, c3 = pcall(Color3.fromHex, hx)
+					if okc and c3 then cc = c3 end
+				end
+				if not r.custom then r.custom = pill(r.row, 3, ct, cc, true, 13) end -- 13 = 3px bigger than the other tags
+				r.custom.Text, r.custom.TextColor3, r.custom.BackgroundColor3 = ct, cc, cc
 			elseif r.custom then
 				r.custom:Destroy(); r.custom = nil
 			end
@@ -3449,6 +3455,7 @@ end)()
 	local ids, ready = {}, false                       -- moderator userIds (as strings)
 	local handledKick = {}
 	T.muted, T.customTitle, T.modNames = {}, {}, {}
+	T.customTitleColor = {} -- [userId] = "rrggbb" chosen by the moderator who gave the title
 	T.granted = T.granted or {}
 	T.musicUntil = {}                                  -- [userId] = ms timestamp until which a moderator-granted !saikimusic access lasts
 	local lastMusicGrant = 0
@@ -3517,6 +3524,7 @@ end)()
 	-- everything moderators did, one small read: kicks, mutes, custom titles, secret frames
 	local function parseMods(data)
 		local mute, title, granted = {}, {}, {}
+		local titleColor = {}
 		local nowms = nowMs()
 		for target, byMap in pairs(data.mute or {}) do
 			local tid = tostring(target)
@@ -3533,16 +3541,22 @@ end)()
 			end
 		end
 		for target, byMap in pairs(data.title or {}) do
-			local best, bt = nil, -1
+			local best, bt, bc = nil, -1, nil
 			if type(byMap) == "table" then
 				for by, rec in pairs(byMap) do
 					if T.isMod(by) and type(rec) == "table" and type(rec.t) == "string" and rec.t ~= "" then
 						local ts = tonumber(rec.ts) or 0
-						if ts > bt then best, bt = rec.t, ts end
+						if ts > bt then
+							best, bt = rec.t, ts
+							bc = (type(rec.c) == "string" and rec.c:match("^%x%x%x%x%x%x$")) and rec.c:lower() or nil
+						end
 					end
 				end
 			end
-			if best then title[tostring(target)] = best:sub(1, 24) end
+			if best then
+				title[tostring(target)] = best:sub(1, 24)
+				titleColor[tostring(target)] = bc
+			end
 		end
 		for target, fmap in pairs(data.frame or {}) do
 			if type(fmap) == "table" then
@@ -3571,7 +3585,7 @@ end)()
 				end
 			end
 		end
-		return mute, title, granted, music
+		return mute, title, granted, music, titleColor
 	end
 
 	-- a moderator kicked me (moderators themselves can't be kicked)
@@ -3598,7 +3612,7 @@ end)()
 		local ok, data = dbRequest("GET", "/mods", nil, dmAuth, DM_FIREBASE_DB)
 		if not ok then return end
 		if type(data) ~= "table" then data = {} end
-		T.muted, T.customTitle, T.granted, T.musicUntil = parseMods(data)
+		T.muted, T.customTitle, T.granted, T.musicUntil, T.customTitleColor = parseMods(data)
 		local mu = T.musicUntil[ME]
 		if mu and not T.isMod(ME) and mu ~= lastMusicGrant then
 			lastMusicGrant = mu
@@ -3612,6 +3626,16 @@ end)()
 	end
 
 	-------- commands
+	-- title colours moderators can pick (name or #rrggbb) for !saikicustomtitle
+	local TCOLORS = { { "pink", "ff69b4" }, { "red", "ff4d4d" }, { "orange", "ff9a3c" }, { "gold", "ffc940" }, { "yellow", "fff04d" },
+		{ "green", "4ddc7a" }, { "cyan", "40e0f0" }, { "blue", "4d9bff" }, { "purple", "a468ff" }, { "white", "ffffff" }, { "black", "1a1a1a" } }
+	local function colorOf(word)
+		local low = word:lower()
+		local hx = low:match("^#(%x%x%x%x%x%x)$")
+		if hx then return hx end
+		for _, c in ipairs(TCOLORS) do if c[1] == low then return c[2] end end
+		return nil
+	end
 	local CMDS = { "!saikikick", "!saikianc", "!giveframe", "!saikicustomtitle", "!saikimute", "!givemusic" }
 	local function isCmd(w) for _, c in ipairs(CMDS) do if c == w then return true end end return false end
 
@@ -3701,14 +3725,23 @@ end)()
 					or ("Couldn't give music access (HTTP " .. tostring(code) .. "). Publish the new DM rules (mods/music)?"))
 			end
 		elseif cmd == "!saikicustomtitle" then
-			if rest == "" then view.notice("Usage: !saikicustomtitle <username> <tag text | off>"); return end
+			if rest == "" then view.notice("Usage: !saikicustomtitle <username> [colour] <tag text | off>   colours: pink red orange gold yellow green cyan blue purple white black or #rrggbb"); return end
 			if rest:lower() == "off" then
 				ok, _, _, code = del("/mods/title/" .. id .. "/" .. me)
 				view.notice(ok and ("Custom tag removed from " .. shown .. ".") or ("Couldn't remove it (HTTP " .. tostring(code) .. ")."))
 			else
-				local t = cut(rest, 24)
-				ok, _, _, code = put("/mods/title/" .. id .. "/" .. me, { ts = SV, t = t })
-				view.notice(ok and (shown .. " now has the tag [" .. t .. "].") or ("Couldn't set the tag (HTTP " .. tostring(code) .. ")."))
+				local cword, ctext = rest:match("^(%S+)%s+(.+)$")
+				local hex = cword and colorOf(cword)
+				local t = cut(hex and ctext or rest, 24)
+				local body = { ts = SV, t = t }
+				if hex then body.c = hex end
+				ok, _, _, code = put("/mods/title/" .. id .. "/" .. me, body)
+				local note = ""
+				if not ok and hex then -- the DM rules may not know the colour field yet: still set the tag, in the default colour
+					ok, _, _, code = put("/mods/title/" .. id .. "/" .. me, { ts = SV, t = t })
+					if ok then note = "  (colour not saved: add the \"c\" field to the mods/title rules)" end
+				end
+				view.notice(ok and (shown .. " now has the tag [" .. t .. "]" .. ((hex and note == "") and (" in #" .. hex) or "") .. "." .. note) or ("Couldn't set the tag (HTTP " .. tostring(code) .. ")."))
 			end
 		elseif cmd == "!giveframe" then
 			local fword, off = rest:match("^(%S+)%s*(%S*)$")
@@ -3798,6 +3831,9 @@ end)()
 			end
 		elseif cmd == "!saikicustomtitle" then
 			if low == "" or ("off"):sub(1, #low) == low then out[#out + 1] = { label = "off (remove tag)", fill = cmd .. " " .. first .. " off" } end
+			for _, c in ipairs(TCOLORS) do
+				if low == "" or c[1]:sub(1, #low) == low then out[#out + 1] = { label = c[1], fill = cmd .. " " .. first .. " " .. c[1] .. " " } end
+			end
 		end
 		return out
 	end
