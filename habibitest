@@ -1001,6 +1001,66 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 		end
 	end
 
+	-- music card: shown to everyone when a song starts. The music system keeps the returned handle and updates it
+	-- (loading % -> time / duration). h.set(text, ratio 0-1) and h.finish(text) are safe to call at any time.
+	function self.addMusic(m)
+		self.n += 1
+		self.lastUid = nil
+		local atBottom = list.CanvasPosition.Y >= list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y - 40
+		local ICE, FROST = Color3.fromRGB(130, 232, 255), Color3.fromRGB(232, 248, 255)
+		local card = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = WHITE,
+			BackgroundTransparency = 0.02, LayoutOrder = self.n, Parent = list }, {
+			corner(8),
+			new("UIStroke", { Color = Color3.fromRGB(120, 224, 255), Thickness = 1.5, Transparency = 0.05,
+				ApplyStrokeMode = Enum.ApplyStrokeMode.Border }),
+			new("UIGradient", { Color = ColorSequence.new(Color3.fromRGB(24, 78, 120), Color3.fromRGB(7, 22, 42)), Rotation = 90 }),
+			new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, HorizontalAlignment = Enum.HorizontalAlignment.Center,
+				Padding = UDim.new(0, 5) }),
+			new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
+				PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }),
+		})
+		new("TextLabel", { Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = "-  N O W   P L A Y I N G  -",
+			Font = Enum.Font.GothamBlack, TextSize = 11, TextColor3 = ICE, LayoutOrder = 1, Parent = card })
+		new("TextLabel", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+			Text = tostring(m.title or ""), TextWrapped = true, Font = Enum.Font.GothamBlack, TextSize = 16, TextColor3 = FROST,
+			TextXAlignment = Enum.TextXAlignment.Center, LayoutOrder = 2, Parent = card })
+		local track = new("Frame", { Size = UDim2.new(1, 0, 0, 5), BackgroundColor3 = WHITE, BackgroundTransparency = 0.8,
+			LayoutOrder = 3, Parent = card }, { corner(3) })
+		local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = ICE, BorderSizePixel = 0, Parent = track }, { corner(3) })
+		local status = new("TextLabel", { Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Text = "Loading...",
+			Font = T.fontB, TextSize = 11, TextColor3 = FROST, LayoutOrder = 4, Parent = card })
+		new("TextLabel", { Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+			Text = "Played by " .. tostring((m.by and m.by ~= "") and m.by or "Moderator") .. "   |   SERVER MUSIC",
+			Font = T.fontB, TextSize = 11, TextColor3 = Color3.fromRGB(130, 178, 206), LayoutOrder = 5, Parent = card })
+		self.rows[#self.rows + 1] = card
+		if #self.rows > CONFIG.MAX_MESSAGES then
+			local old = table.remove(self.rows, 1)
+			local k = old:GetAttribute("k")
+			if k then self.items[k] = nil; self.reacts[k] = nil; self.mineLock[k] = nil end
+			old:Destroy()
+		end
+		if atBottom then
+			task.defer(function()
+				RunService.Heartbeat:Wait()
+				if alive then list.CanvasPosition = Vector2.new(0, math.max(0, list.AbsoluteCanvasSize.Y - list.AbsoluteSize.Y)) end
+			end)
+		end
+		local h = { done = false }
+		function h.set(text, ratio)
+			if h.done or not card.Parent then return end
+			status.Text = tostring(text or "")
+			local sz = UDim2.fromScale(math.clamp(tonumber(ratio) or 0, 0, 1), 1)
+			if T.anim ~= false then tween(fill, 0.9, { Size = sz }, Enum.EasingStyle.Linear) else fill.Size = sz end
+		end
+		function h.finish(text)
+			if h.done or not card.Parent then return end
+			h.done = true
+			status.Text = tostring(text or "Finished")
+			status.TextColor3 = Color3.fromRGB(130, 178, 206)
+		end
+		return h
+	end
+
 	-- welcome line: someone just loaded Saiki Rechat in this server. Quiet on purpose: no bubble, no box, no sound
 	function self.addWelcome(m)
 		self.n += 1
@@ -3390,9 +3450,18 @@ end)()
 	local handledKick = {}
 	T.muted, T.customTitle, T.modNames = {}, {}, {}
 	T.granted = T.granted or {}
+	T.musicUntil = {}                                  -- [userId] = ms timestamp until which a moderator-granted !saikimusic access lasts
+	local lastMusicGrant = 0
 
 	local function nowMs() return os.time() * 1000 end
 	function T.isMod(id) return ids[tostring(id)] == true end
+	-- can this user control Saiki music? moderators always, others only while a moderator's !givemusic grant is active
+	function T.canMusic(id)
+		local tid = tostring(id)
+		if T.isMod(tid) then return true end
+		local u = T.musicUntil[tid]
+		return u ~= nil and u > nowMs()
+	end
 	function T.isMuted(id)
 		local tid = tostring(id)
 		local u = T.muted[tid]
@@ -3490,7 +3559,19 @@ end)()
 				end
 			end
 		end
-		return mute, title, granted
+		local music = {}
+		for target, byMap in pairs(data.music or {}) do
+			local tid = tostring(target)
+			if type(byMap) == "table" and not T.isMod(tid) then
+				for by, rec in pairs(byMap) do
+					if T.isMod(by) and type(rec) == "table" then
+						local u = tonumber(rec["until"]) or 0
+						if u > nowms and (music[tid] == nil or u > music[tid]) then music[tid] = u end
+					end
+				end
+			end
+		end
+		return mute, title, granted, music
 	end
 
 	-- a moderator kicked me (moderators themselves can't be kicked)
@@ -3517,14 +3598,21 @@ end)()
 		local ok, data = dbRequest("GET", "/mods", nil, dmAuth, DM_FIREBASE_DB)
 		if not ok then return end
 		if type(data) ~= "table" then data = {} end
-		T.muted, T.customTitle, T.granted = parseMods(data)
+		T.muted, T.customTitle, T.granted, T.musicUntil = parseMods(data)
+		local mu = T.musicUntil[ME]
+		if mu and not T.isMod(ME) and mu ~= lastMusicGrant then
+			lastMusicGrant = mu
+			if T.notify then
+				T.notify("musicgrant", "Saiki music unlocked", "A moderator gave you !saikimusic for " .. math.max(1, math.ceil((mu - nowMs()) / 60000)) .. " min")
+			end
+		end
 		checkKick(data)
 		if T.refreshFrames then pcall(T.refreshFrames) end
 		if T.repaintTags then pcall(T.repaintTags) end
 	end
 
 	-------- commands
-	local CMDS = { "!saikikick", "!saikianc", "!giveframe", "!saikicustomtitle", "!saikimute" }
+	local CMDS = { "!saikikick", "!saikianc", "!giveframe", "!saikicustomtitle", "!saikimute", "!givemusic" }
 	local function isCmd(w) for _, c in ipairs(CMDS) do if c == w then return true end end return false end
 
 	-- username -> userId, also for players who are not in this server
@@ -3595,6 +3683,23 @@ end)()
 				view.notice(ok and (shown .. " is muted " .. (mins and ("for " .. mins .. " min") or "until you unmute them (!saikimute " .. shown .. " off)") .. ".")
 					or ("Couldn't mute (HTTP " .. tostring(code) .. ")."))
 			end
+		elseif cmd == "!givemusic" then
+			if T.isMod(id) then view.notice("Moderators already have music access."); return end
+			local a = rest:lower()
+			if a == "off" or a == "remove" then
+				ok, _, _, code = del("/mods/music/" .. id .. "/" .. me)
+				view.notice(ok and ("Took music access back from " .. shown .. ".") or ("Couldn't remove it (HTTP " .. tostring(code) .. ")."))
+			else
+				local num, unit = a:match("^(%d+)%s*([mhd]?)")
+				local n = tonumber(num)
+				if not n or n < 1 then view.notice("Usage: !givemusic <username> <time>  e.g. 30, 30m, 2h, 1d  (or: off)"); return end
+				local mult = (unit == "h" and 60) or (unit == "d" and 1440) or 1
+				local mins = math.min(n * mult, 7 * 1440) -- max 7 days
+				ok, _, _, code = put("/mods/music/" .. id .. "/" .. me, { ts = SV, ["until"] = nowMs() + mins * 60000 })
+				local nice = (mins % 1440 == 0 and (mins / 1440 .. " day(s)")) or (mins % 60 == 0 and (mins / 60 .. " hour(s)")) or (mins .. " min")
+				view.notice(ok and (shown .. " can use !saikimusic for " .. nice .. ". It can take up to 20 seconds to reach them.")
+					or ("Couldn't give music access (HTTP " .. tostring(code) .. "). Publish the new DM rules (mods/music)?"))
+			end
 		elseif cmd == "!saikicustomtitle" then
 			if rest == "" then view.notice("Usage: !saikicustomtitle <username> <tag text | off>"); return end
 			if rest:lower() == "off" then
@@ -3661,7 +3766,7 @@ end)()
 				local nm, dn = p.Name:lower(), p.DisplayName:lower()
 				local hit = low == "" or nm:sub(1, #low) == low or dn:sub(1, #low) == low
 					or (#low >= 2 and (nm:find(low, 1, true) ~= nil or dn:find(low, 1, true) ~= nil))
-				local protected = (cmd == "!saikikick" or cmd == "!saikimute") and T.isMod(p.UserId)
+				local protected = (cmd == "!saikikick" or cmd == "!saikimute" or cmd == "!givemusic") and T.isMod(p.UserId)
 				if hit and not protected then
 					out[#out + 1] = { label = (p.DisplayName ~= p.Name) and (p.DisplayName .. " (@" .. p.Name .. ")") or p.Name, fill = cmd .. " " .. p.Name .. " " }
 					if #out >= 6 then break end
@@ -3683,6 +3788,12 @@ end)()
 			for _, k in ipairs({ "off", "10", "30", "60", "1440" }) do
 				if low == "" or k:sub(1, #low) == low then
 					out[#out + 1] = { label = (k == "off") and "off (unmute)" or (k .. " min"), fill = cmd .. " " .. first .. " " .. k }
+				end
+			end
+		elseif cmd == "!givemusic" then
+			for _, k in ipairs({ "10m", "30m", "1h", "6h", "1d", "off" }) do
+				if low == "" or k:sub(1, #low) == low then
+					out[#out + 1] = { label = (k == "off") and "off (remove)" or k, fill = cmd .. " " .. first .. " " .. k }
 				end
 			end
 		elseif cmd == "!saikicustomtitle" then
@@ -3789,10 +3900,12 @@ end)()
 	local refreshPanel
 	local applyState
 	local promote
+	local updateCard
 
 	local function setStatus(text)
 		M.status = text or ""
 		if refreshPanel then refreshPanel() end
+		if updateCard then updateCard() end
 	end
 
 	local function startJob(id, key)
@@ -3913,6 +4026,26 @@ end)()
 		end
 	end
 
+	-- keeps the "Now playing" card in the server chat in step with the song: loading % -> time / duration
+	updateCard = function()
+		local c, cur, st = M.card, M.cur, M.state
+		if not c or c.done or not cur or not st then return end
+		local snd = M.sound
+		if M.pct then
+			c.set("Loading  " .. M.pct .. "%", M.pct / 100)
+		elseif snd and snd.IsLoaded and snd.TimeLength > 0 then
+			if st.state == "play" and targetPos(st, snd.TimeLength) == nil then
+				c.set(fmtTime(snd.TimeLength) .. " / " .. fmtTime(snd.TimeLength), 1)
+				c.finish("Finished  ·  " .. fmtTime(snd.TimeLength))
+				return
+			end
+			local pos = snd.TimePosition
+			c.set(((st.state == "pause") and "Paused  ·  " or "") .. fmtTime(pos) .. " / " .. fmtTime(snd.TimeLength), pos / snd.TimeLength)
+		else
+			c.set("Loading...", 0)
+		end
+	end
+
 	local function stopBody()
 		return { state = "stop", by = ME, n = os.time() * 1000 + math.random(0, 999), at = nowSrv() }
 	end
@@ -3941,8 +4074,15 @@ end)()
 		M.cur = { id = id, n = st.n, title = st.title, by = st.by, bn = st.bn, len = len }
 		M.pct = nil
 		M.warn = ""
+		if M.card then pcall(M.card.finish, "Replaced by a new song") end
+		M.card = nil
+		if views[1] and views[1].addMusic then
+			local okc, card = pcall(views[1].addMusic, { title = st.title, by = (st.bn ~= "" and st.bn or "Moderator"), len = len })
+			if okc then M.card = card end
+		end
 		if not fsOk() then
 			setStatus("This executor can't save audio (needs isfile, readfile, writefile and getcustomasset).")
+			if M.card then M.card.finish("This device can't play audio") end
 			return
 		end
 		task.spawn(function()
@@ -3970,6 +4110,7 @@ end)()
 			local function fail(reason)
 				M.pct = nil
 				M.warn = ""
+				if M.card then M.card.finish("Couldn't load the song") end
 				setStatus("Couldn't load the song: " .. tostring(reason))
 				T.notify("musicfail", "Server music", "Couldn't load: " .. cut(tostring(reason), 28))
 				if st.by == ME then
@@ -4021,7 +4162,7 @@ end)()
 	local function parseState(d)
 		if type(d) ~= "table" or not validId(d.id) then return nil end
 		if d.state ~= "play" and d.state ~= "pause" and d.state ~= "load" then return nil end
-		if not (T.isMod and T.isMod(d.by)) then return nil end
+		if not (T.canMusic and T.canMusic(d.by)) then return nil end
 		local st = {
 			id = d.id,
 			title = cut(clean(d.title or ""), 80),
@@ -4053,6 +4194,7 @@ end)()
 				M.cur = nil
 				M.pct = nil
 				M.warn = ""
+				if M.card then M.card.finish("Stopped") end
 				setStatus("")
 			end
 			return
@@ -4099,7 +4241,7 @@ end)()
 		task.spawn(write, body)
 	end
 
-	local function isMe() return T.isMod and T.isMod(ME) end
+	local function isMe() return T.canMusic and T.canMusic(ME) end -- moderators, or players holding an active !givemusic grant
 
 	local function modPlay(v)
 		if not isMe() then return end
@@ -4407,7 +4549,7 @@ end)()
 		local low = cmd and cmd:lower() or ""
 		if low == "!saikimusic" then
 			if not isMe() then
-				view.notice("Moderator commands are for Saiki Rechat moderators only.")
+				view.notice("Saiki music is for moderators, or players a moderator gave access with !givemusic.")
 			elseif panel then
 				closePanel()
 			else
@@ -4480,6 +4622,7 @@ end)()
 		while alive do
 			pcall(syncSound)
 			pcall(function() if refreshPanel then refreshPanel() end end)
+			pcall(function() if updateCard then updateCard() end end)
 			task.wait(1)
 		end
 	end)
