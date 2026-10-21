@@ -1,35 +1,60 @@
-
---========================================================
--- SAIKI YOUTUBE SEARCH v4
--- YouTube Data API v3 | Roblox Executor
---========================================================
-
 local API_KEY = "AIzaSyDrMXfPlivYHSMUsM3zcxZ4srY6yKkK3PY"
+
+local DOWNLOAD_KEYS = {
+    "21fbd971d02303568cf35043e7993dafc4ddf260",
+    "bbef82fcaaf5e3272e8c2b7e373239add6f0a5ad",
+    "13e24bc93edbe1f693dd89ca192ed67b63e7eae4",
+    "8e478fd61e30968d16db9e542402d4782738a201",
+    "c9aa069e6bf1b0714c2c407f8370fa273c1485ec"
+}
+
+local AUDIO_FOLDER = "SaikiYT"
+local MIN_AUDIO_BYTES = 2048
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
-
--- Clean up previous copy
-local GUI_NAME = "SaikiYouTubeSearch"
+local SoundService = game:GetService("SoundService")
 local CoreGui = game:GetService("CoreGui")
 
-pcall(function()
-    local old = CoreGui:FindFirstChild(GUI_NAME)
-    if old then old:Destroy() end
-end)
+local GUI_NAME = "SaikiYouTubeSearch"
+local SOUND_NAME = "SaikiYTAudio"
+
+local GREEN = Color3.fromRGB(115, 225, 160)
+local ORANGE = Color3.fromRGB(255, 170, 100)
+local RED = Color3.fromRGB(255, 115, 115)
+local LIGHT = Color3.fromRGB(190, 194, 207)
 
 local parent
+
 pcall(function()
     if gethui then
         parent = gethui()
     end
 end)
+
 parent = parent or CoreGui
 
---========================================================
--- HTTP / CLIPBOARD
---========================================================
+pcall(function()
+    local old = CoreGui:FindFirstChild(GUI_NAME)
+    if old then
+        old:Destroy()
+    end
+end)
+
+pcall(function()
+    local old = parent:FindFirstChild(GUI_NAME)
+    if old then
+        old:Destroy()
+    end
+end)
+
+pcall(function()
+    local oldSound = SoundService:FindFirstChild(SOUND_NAME)
+    if oldSound then
+        oldSound:Destroy()
+    end
+end)
 
 local httpRequest =
     (syn and syn.request)
@@ -87,6 +112,37 @@ local function httpGet(url)
     return data
 end
 
+local function safeGet(url)
+    local ok, response = pcall(httpRequest, {
+        Url = url,
+        Method = "GET"
+    })
+
+    if not ok or not response then
+        return nil
+    end
+
+    local body = response.Body or response.body
+
+    if type(body) ~= "string" or #body == 0 then
+        return nil
+    end
+
+    return body
+end
+
+local function decodeJson(body)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(body)
+    end)
+
+    if ok and type(data) == "table" then
+        return data
+    end
+
+    return nil
+end
+
 local function copyText(value)
     if setclipboard then
         setclipboard(value)
@@ -102,18 +158,26 @@ local function copyText(value)
     return false
 end
 
---========================================================
--- HELPERS
---========================================================
-
 local function encodeURL(value)
-    return tostring(value):gsub("([^%w%-_%.~])", function(char)
+    return (tostring(value):gsub("([^%w%-_%.~])", function(char)
         return string.format("%%%02X", string.byte(char))
-    end)
+    end))
 end
 
--- Correct Lua-compatible ISO 8601 duration parser.
--- Examples: PT59S, PT5M20S, PT1H2M3S, P1DT2H
+local function trim(value)
+    return (value:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function formatTime(seconds)
+    seconds = math.max(0, seconds or 0)
+
+    return string.format(
+        "%d:%02d",
+        math.floor(seconds / 60),
+        math.floor(seconds % 60)
+    )
+end
+
 local function parseDuration(value)
     if type(value) ~= "string" or value:sub(1, 1) ~= "P" then
         return "Unavailable", nil
@@ -149,6 +213,26 @@ local function parseDuration(value)
     return formatted, total
 end
 
+local function extractVideoId(text)
+    local lowered = text:lower()
+
+    if not (lowered:find("youtube.com", 1, true) or lowered:find("youtu.be", 1, true)) then
+        return nil
+    end
+
+    local candidate = text:match("youtu%.be/([%w_%-]+)")
+        or text:match("[?&]v=([%w_%-]+)")
+        or text:match("/shorts/([%w_%-]+)")
+        or text:match("/embed/([%w_%-]+)")
+        or text:match("/live/([%w_%-]+)")
+
+    if candidate and #candidate >= 11 then
+        return candidate:sub(1, 11)
+    end
+
+    return nil
+end
+
 local function make(className, properties, parentObject)
     local object = Instance.new(className)
 
@@ -160,10 +244,6 @@ local function make(className, properties, parentObject)
     return object
 end
 
---========================================================
--- GUI
---========================================================
-
 local gui = make("ScreenGui", {
     Name = GUI_NAME,
     ResetOnSpawn = false,
@@ -172,8 +252,8 @@ local gui = make("ScreenGui", {
 
 local window = make("Frame", {
     Name = "Main",
-    Size = UDim2.fromOffset(540, 475),
-    Position = UDim2.new(0.5, -270, 0.5, -237),
+    Size = UDim2.fromOffset(540, 520),
+    Position = UDim2.new(0.5, -270, 0.5, -260),
     BackgroundColor3 = Color3.fromRGB(19, 20, 25),
     BorderSizePixel = 0,
     ClipsDescendants = true
@@ -188,7 +268,6 @@ make("UIStroke", {
     Thickness = 1
 }, window)
 
--- Header: close button on top-left
 local header = make("Frame", {
     Name = "Header",
     Size = UDim2.new(1, 0, 0, 44),
@@ -222,11 +301,6 @@ local title = make("TextLabel", {
     TextXAlignment = Enum.TextXAlignment.Left
 }, header)
 
-closeButton.MouseButton1Click:Connect(function()
-    gui:Destroy()
-end)
-
--- Dragging
 do
     local dragging = false
     local dragInput
@@ -270,14 +344,13 @@ do
     end)
 end
 
--- Search bar
 local searchBox = make("TextBox", {
     Position = UDim2.fromOffset(12, 56),
     Size = UDim2.new(1, -112, 0, 38),
     BackgroundColor3 = Color3.fromRGB(34, 36, 44),
     TextColor3 = Color3.fromRGB(245, 246, 250),
     PlaceholderColor3 = Color3.fromRGB(145, 149, 162),
-    PlaceholderText = "Search YouTube...",
+    PlaceholderText = "Search YouTube or paste a video link...",
     Text = "",
     ClearTextOnFocus = false,
     TextSize = 14,
@@ -314,7 +387,7 @@ local statusLabel = make("TextLabel", {
     Position = UDim2.fromOffset(14, 99),
     Size = UDim2.new(1, -28, 0, 23),
     BackgroundTransparency = 1,
-    Text = "Enter a search term to begin.",
+    Text = "Enter a search term or paste a link to begin.",
     TextColor3 = Color3.fromRGB(160, 165, 180),
     TextSize = 12,
     Font = Enum.Font.Gotham,
@@ -322,10 +395,9 @@ local statusLabel = make("TextLabel", {
     TextTruncate = Enum.TextTruncate.AtEnd
 }, window)
 
--- Results container
 local resultsFrame = make("ScrollingFrame", {
     Position = UDim2.fromOffset(12, 125),
-    Size = UDim2.new(1, -24, 1, -181),
+    Size = UDim2.new(1, -24, 1, -225),
     BackgroundColor3 = Color3.fromRGB(23, 24, 30),
     BorderSizePixel = 0,
     ScrollBarThickness = 4,
@@ -350,7 +422,94 @@ local resultsLayout = make("UIListLayout", {
     SortOrder = Enum.SortOrder.LayoutOrder
 }, resultsFrame)
 
--- Footer
+local playerBar = make("Frame", {
+    Name = "PlayerBar",
+    Position = UDim2.new(0, 12, 1, -96),
+    Size = UDim2.new(1, -24, 0, 46),
+    BackgroundColor3 = Color3.fromRGB(27, 29, 36),
+    BorderSizePixel = 0
+}, window)
+
+make("UICorner", {
+    CornerRadius = UDim.new(0, 8)
+}, playerBar)
+
+local nowTitle = make("TextLabel", {
+    Position = UDim2.fromOffset(10, 3),
+    Size = UDim2.new(1, -170, 0, 18),
+    BackgroundTransparency = 1,
+    Text = "Nothing playing",
+    TextColor3 = Color3.fromRGB(245, 246, 250),
+    TextSize = 12,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd
+}, playerBar)
+
+local function makePlayerButton(text, xOffset, width)
+    local button = make("TextButton", {
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, xOffset, 0, 3),
+        Size = UDim2.fromOffset(width, 20),
+        BackgroundColor3 = Color3.fromRGB(43, 46, 56),
+        Text = text,
+        TextColor3 = Color3.fromRGB(235, 237, 244),
+        TextSize = 10,
+        Font = Enum.Font.GothamBold,
+        BorderSizePixel = 0
+    }, playerBar)
+
+    make("UICorner", {
+        CornerRadius = UDim.new(0, 6)
+    }, button)
+
+    return button
+end
+
+local stopButton = makePlayerButton("STOP", -6, 40)
+local loopButton = makePlayerButton("LOOP", -52, 40)
+local pauseButton = makePlayerButton("PLAY", -98, 52)
+
+local progressTrack = make("Frame", {
+    Position = UDim2.fromOffset(10, 25),
+    Size = UDim2.new(1, -20, 0, 6),
+    BackgroundColor3 = Color3.fromRGB(50, 53, 66),
+    BorderSizePixel = 0
+}, playerBar)
+
+make("UICorner", {
+    CornerRadius = UDim.new(0, 3)
+}, progressTrack)
+
+local progressFill = make("Frame", {
+    Size = UDim2.new(0, 0, 1, 0),
+    BackgroundColor3 = GREEN,
+    BorderSizePixel = 0
+}, progressTrack)
+
+make("UICorner", {
+    CornerRadius = UDim.new(0, 3)
+}, progressFill)
+
+local seekArea = make("TextButton", {
+    Position = UDim2.fromOffset(10, 21),
+    Size = UDim2.new(1, -20, 0, 14),
+    BackgroundTransparency = 1,
+    Text = "",
+    ZIndex = 3
+}, playerBar)
+
+local timeLabel = make("TextLabel", {
+    Position = UDim2.fromOffset(10, 32),
+    Size = UDim2.new(1, -20, 0, 12),
+    BackgroundTransparency = 1,
+    Text = "0:00 / 0:00",
+    TextColor3 = Color3.fromRGB(150, 155, 172),
+    TextSize = 10,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left
+}, playerBar)
+
 local previousButton = make("TextButton", {
     Position = UDim2.new(0, 12, 1, -45),
     Size = UDim2.fromOffset(125, 32),
@@ -392,18 +551,459 @@ make("UICorner", {
     CornerRadius = UDim.new(0, 7)
 }, nextButton)
 
---========================================================
--- SEARCH AND PAGINATION
---========================================================
+local function setStatus(text, color)
+    statusLabel.Text = text
+    statusLabel.TextColor3 = color or LIGHT
+end
+
+local player = {
+    sound = nil,
+    looping = false,
+    generation = 0,
+    activeKey = 1
+}
+
+local channelLabels = {}
+
+local function hasFileSystem()
+    return type(isfile) == "function"
+        and type(writefile) == "function"
+        and type(readfile) == "function"
+        and type(isfolder) == "function"
+        and type(makefolder) == "function"
+end
+
+local function audioPath(videoId)
+    return AUDIO_FOLDER .. "/" .. videoId .. ".mp3"
+end
+
+local function isCached(videoId)
+    if not hasFileSystem() then
+        return false
+    end
+
+    local ok, exists = pcall(isfile, audioPath(videoId))
+
+    return ok and exists == true
+end
+
+local function assetFor(path)
+    if getcustomasset then
+        return getcustomasset(path)
+    end
+
+    if getsynasset then
+        return getsynasset(path)
+    end
+
+    return "rbxasset://" .. path
+end
+
+local function refreshSavedTag(videoId)
+    local label = channelLabels[videoId]
+
+    if label and label.Parent and label.Text:sub(-5) ~= "saved" then
+        label.Text = label.Text .. "  •  saved"
+    end
+end
+
+local function destroySound()
+    local sound = player.sound
+    player.sound = nil
+
+    if sound then
+        pcall(function()
+            sound:Stop()
+            sound:Destroy()
+        end)
+    end
+end
+
+local function resetPlayerUI(titleText)
+    nowTitle.Text = titleText or "Nothing playing"
+    progressFill.Size = UDim2.new(0, 0, 1, 0)
+    timeLabel.Text = "0:00 / 0:00"
+    pauseButton.Text = "PLAY"
+end
+
+local function startJob(videoId, key)
+    local watchURL = "https://www.youtube.com/watch?v=" .. videoId
+
+    local url = "https://p.savenow.to/ajax/download.php?url="
+        .. encodeURL(watchURL)
+        .. "&format=mp3&apikey=" .. encodeURL(key)
+        .. "&add_info=1&allow_extended_duration=1&no_merge=0"
+
+    local body = safeGet(url)
+
+    if not body then
+        return nil, "No response"
+    end
+
+    local data = decodeJson(body)
+
+    if not data then
+        return nil, "Bad JSON"
+    end
+
+    if data.id then
+        return data.id, nil
+    end
+
+    return nil, tostring(data.error or data.message or "Job failed")
+end
+
+local function waitForJob(jobId, generation, onProgress)
+    local deadline = tick() + 300
+
+    while tick() < deadline do
+        if generation ~= player.generation then
+            return nil, "Cancelled"
+        end
+
+        local body = safeGet(
+            "https://p.savenow.to/ajax/progress.php?id=" .. encodeURL(jobId)
+        )
+
+        local data = body and decodeJson(body)
+
+        if data then
+            local raw = tonumber(data.progress) or 0
+            local percent
+
+            if raw > 100 then
+                percent = math.floor(raw / 10)
+            else
+                percent = math.floor(raw)
+            end
+
+            percent = math.clamp(percent, 0, 100)
+            onProgress(percent)
+
+            if raw >= 1000 and data.download_url then
+                return data.download_url, data
+            end
+
+            if data.error and data.error ~= "" then
+                return nil, tostring(data.error)
+            end
+        end
+
+        task.wait(1.5)
+    end
+
+    return nil, "Timeout"
+end
+
+local function ensureAudio(videoId, generation, onProgress)
+    if not isfolder(AUDIO_FOLDER) then
+        makefolder(AUDIO_FOLDER)
+    end
+
+    local path = audioPath(videoId)
+
+    if isfile(path) then
+        local okRead, content = pcall(readfile, path)
+
+        if okRead and type(content) == "string" and #content >= MIN_AUDIO_BYTES then
+            return path, nil
+        end
+    end
+
+    local jobId
+    local lastError = "No response"
+
+    for attempt = 0, #DOWNLOAD_KEYS - 1 do
+        if generation ~= player.generation then
+            return nil, "Cancelled"
+        end
+
+        local keyIndex = (player.activeKey - 1 + attempt) % #DOWNLOAD_KEYS + 1
+        local startedId, startError = startJob(videoId, DOWNLOAD_KEYS[keyIndex])
+
+        if startedId then
+            jobId = startedId
+            player.activeKey = keyIndex
+            break
+        end
+
+        lastError = startError or lastError
+        task.wait(0.5)
+    end
+
+    if not jobId then
+        return nil, lastError
+    end
+
+    local downloadURL, info = waitForJob(jobId, generation, onProgress)
+
+    if not downloadURL then
+        return nil, tostring(info)
+    end
+
+    local body = safeGet(downloadURL)
+
+    if not body or #body < MIN_AUDIO_BYTES then
+        return nil, "Download failed"
+    end
+
+    writefile(path, body)
+
+    return path, nil
+end
+
+local function lookupTitle(videoId)
+    local fallback = "YouTube audio " .. videoId
+
+    local ok, data = pcall(
+        httpGet,
+        "https://www.googleapis.com/youtube/v3/videos?part=snippet&id="
+            .. encodeURL(videoId)
+            .. "&key=" .. encodeURL(API_KEY)
+    )
+
+    if ok
+        and type(data) == "table"
+        and data.items
+        and data.items[1]
+        and data.items[1].snippet then
+        return data.items[1].snippet.title or fallback
+    end
+
+    return fallback
+end
+
+local function playVideo(video)
+    if not hasFileSystem() then
+        setStatus(
+            "Your executor is missing file functions (isfile / readfile / writefile).",
+            ORANGE
+        )
+        return
+    end
+
+    player.generation += 1
+    local generation = player.generation
+
+    destroySound()
+    resetPlayerUI(video.title or video.id)
+    progressFill.BackgroundColor3 = ORANGE
+
+    task.spawn(function()
+        local videoTitle = video.title
+
+        if not videoTitle then
+            setStatus("Looking up video...", LIGHT)
+            videoTitle = lookupTitle(video.id)
+
+            if generation ~= player.generation then
+                return
+            end
+
+            nowTitle.Text = videoTitle
+        end
+
+        local wasCached = isCached(video.id)
+
+        if wasCached then
+            setStatus("Found saved audio. Loading...", GREEN)
+        else
+            setStatus("Downloading audio...", LIGHT)
+        end
+
+        local function onProgress(percent)
+            if generation ~= player.generation then
+                return
+            end
+
+            progressFill.Size = UDim2.new(percent / 100, 0, 1, 0)
+            timeLabel.Text = "Downloading " .. tostring(percent) .. "%"
+            setStatus("Downloading audio... " .. tostring(percent) .. "%", LIGHT)
+        end
+
+        local ok, path, failure = pcall(ensureAudio, video.id, generation, onProgress)
+
+        if not ok then
+            failure = path
+            path = nil
+        end
+
+        if generation ~= player.generation then
+            return
+        end
+
+        if not path then
+            resetPlayerUI()
+            setStatus("Audio error: " .. tostring(failure), RED)
+            return
+        end
+
+        local sound = Instance.new("Sound")
+        sound.Name = SOUND_NAME
+        sound.Volume = 1
+        sound.Looped = player.looping
+
+        local okAsset, asset = pcall(assetFor, path)
+
+        if not okAsset then
+            sound:Destroy()
+            resetPlayerUI()
+            setStatus("Could not load the file: " .. tostring(asset), RED)
+            return
+        end
+
+        sound.SoundId = asset
+        sound.Parent = SoundService
+        player.sound = sound
+
+        local waited = 0
+
+        while not sound.IsLoaded and waited < 10 do
+            task.wait(0.1)
+            waited += 0.1
+
+            if generation ~= player.generation then
+                sound:Destroy()
+                return
+            end
+        end
+
+        if not sound.IsLoaded then
+            sound:Destroy()
+
+            if player.sound == sound then
+                player.sound = nil
+            end
+
+            if delfile then
+                pcall(delfile, path)
+            end
+
+            resetPlayerUI()
+            setStatus("Audio failed to load. The saved copy was removed, try again.", RED)
+            return
+        end
+
+        progressFill.BackgroundColor3 = GREEN
+        nowTitle.Text = videoTitle
+
+        sound.Ended:Connect(function()
+            if player.sound == sound then
+                pauseButton.Text = "PLAY"
+                setStatus("Finished: " .. videoTitle, LIGHT)
+            end
+        end)
+
+        sound:Play()
+        refreshSavedTag(video.id)
+
+        if wasCached then
+            setStatus("Playing saved copy: " .. videoTitle, GREEN)
+        else
+            setStatus("Downloaded and playing: " .. videoTitle, GREEN)
+        end
+    end)
+end
+
+pauseButton.MouseButton1Click:Connect(function()
+    local sound = player.sound
+
+    if not sound or not sound.IsLoaded then
+        return
+    end
+
+    if sound.IsPlaying then
+        sound:Pause()
+        pauseButton.Text = "PLAY"
+    elseif sound.IsPaused then
+        sound:Resume()
+        pauseButton.Text = "PAUSE"
+    else
+        sound:Play()
+        pauseButton.Text = "PAUSE"
+    end
+end)
+
+loopButton.MouseButton1Click:Connect(function()
+    player.looping = not player.looping
+
+    if player.sound then
+        player.sound.Looped = player.looping
+    end
+
+    if player.looping then
+        loopButton.BackgroundColor3 = Color3.fromRGB(54, 82, 126)
+    else
+        loopButton.BackgroundColor3 = Color3.fromRGB(43, 46, 56)
+    end
+end)
+
+stopButton.MouseButton1Click:Connect(function()
+    player.generation += 1
+    destroySound()
+    resetPlayerUI()
+    setStatus("Stopped.", LIGHT)
+end)
+
+seekArea.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        local sound = player.sound
+
+        if sound and sound.IsLoaded and sound.TimeLength > 0 then
+            local ratio = math.clamp(
+                (input.Position.X - progressTrack.AbsolutePosition.X)
+                    / progressTrack.AbsoluteSize.X,
+                0,
+                1
+            )
+
+            sound.TimePosition = ratio * sound.TimeLength
+        end
+    end
+end)
+
+closeButton.MouseButton1Click:Connect(function()
+    player.generation += 1
+    destroySound()
+    gui:Destroy()
+end)
+
+task.spawn(function()
+    while gui.Parent do
+        local sound = player.sound
+
+        if sound and sound.Parent and sound.IsLoaded and sound.TimeLength > 0 then
+            local ratio = math.clamp(sound.TimePosition / sound.TimeLength, 0, 1)
+
+            progressFill.Size = UDim2.new(ratio, 0, 1, 0)
+
+            timeLabel.Text = formatTime(sound.TimePosition)
+                .. " / " .. formatTime(sound.TimeLength)
+
+            if sound.IsPlaying then
+                pauseButton.Text = "PAUSE"
+            else
+                pauseButton.Text = "PLAY"
+            end
+        end
+
+        task.wait(0.25)
+    end
+end)
 
 local allResults = {}
 local currentPage = 1
+local currentQuery = ""
 local nextPageToken = nil
 local searchGeneration = 0
 local isLoading = false
 local noMorePages = false
 
 local function clearResults()
+    channelLabels = {}
+
     for _, child in ipairs(resultsFrame:GetChildren()) do
         if child:IsA("Frame") or child:IsA("TextLabel") then
             child:Destroy()
@@ -433,6 +1033,17 @@ local function updateFooter()
 
     nextButton.Active = not isLoading
     nextButton.AutoButtonColor = nextButton.Active
+end
+
+local function channelText(video)
+    local text = (video.channel or "Unknown channel")
+        .. "  •  " .. (video.duration or "Unavailable")
+
+    if isCached(video.id) then
+        text = text .. "  •  saved"
+    end
+
+    return text
 end
 
 local function addResultCard(video, index)
@@ -466,8 +1077,7 @@ local function addResultCard(video, index)
         Position = UDim2.fromOffset(10, 45),
         Size = UDim2.new(1, -120, 0, 21),
         BackgroundTransparency = 1,
-        Text = (video.channel or "Unknown channel")
-            .. "  •  " .. (video.duration or "Unavailable"),
+        Text = channelText(video),
         TextColor3 = Color3.fromRGB(165, 171, 188),
         TextSize = 10,
         Font = Enum.Font.Gotham,
@@ -475,10 +1085,28 @@ local function addResultCard(video, index)
         TextTruncate = Enum.TextTruncate.AtEnd
     }, card)
 
+    channelLabels[video.id] = channel
+
+    local playButton = make("TextButton", {
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -8, 0, 6),
+        Size = UDim2.fromOffset(88, 30),
+        BackgroundColor3 = Color3.fromRGB(46, 125, 88),
+        Text = "PLAY AUDIO",
+        TextColor3 = Color3.new(1, 1, 1),
+        TextSize = 10,
+        Font = Enum.Font.GothamBold,
+        BorderSizePixel = 0
+    }, card)
+
+    make("UICorner", {
+        CornerRadius = UDim.new(0, 7)
+    }, playButton)
+
     local copyButton = make("TextButton", {
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -8, 0.5, 0),
-        Size = UDim2.fromOffset(88, 32),
+        AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -8, 0, 40),
+        Size = UDim2.fromOffset(88, 30),
         BackgroundColor3 = Color3.fromRGB(54, 82, 126),
         Text = "COPY LINK",
         TextColor3 = Color3.new(1, 1, 1),
@@ -491,16 +1119,18 @@ local function addResultCard(video, index)
         CornerRadius = UDim.new(0, 7)
     }, copyButton)
 
+    playButton.MouseButton1Click:Connect(function()
+        playVideo(video)
+    end)
+
     copyButton.MouseButton1Click:Connect(function()
         local url = "https://www.youtube.com/watch?v=" .. video.id
 
         if copyText(url) then
-            statusLabel.Text = "Copied: " .. (video.title or video.id)
-            statusLabel.TextColor3 = Color3.fromRGB(115, 225, 160)
+            setStatus("Copied: " .. (video.title or video.id), GREEN)
             copyButton.Text = "COPIED!"
         else
-            statusLabel.Text = "Clipboard is unsupported by this executor."
-            statusLabel.TextColor3 = Color3.fromRGB(255, 170, 100)
+            setStatus("Clipboard is unsupported by this executor.", ORANGE)
         end
     end)
 end
@@ -528,15 +1158,13 @@ local function renderPage()
     nextButton.AutoButtonColor = nextButton.Active
 end
 
--- Get another batch of YouTube search results and durations.
 local function fetchBatch(generation, query)
     if isLoading or noMorePages then
         return
     end
 
     isLoading = true
-    statusLabel.Text = "Searching YouTube and loading durations..."
-    statusLabel.TextColor3 = Color3.fromRGB(190, 194, 207)
+    setStatus("Searching YouTube and loading durations...", LIGHT)
     updateFooter()
 
     task.spawn(function()
@@ -564,6 +1192,7 @@ local function fetchBatch(generation, query)
 
             for _, item in ipairs(searchData.items or {}) do
                 local id = item.id and item.id.videoId
+
                 if id then
                     table.insert(ids, id)
                     snippetsById[id] = item.snippet or {}
@@ -574,7 +1203,6 @@ local function fetchBatch(generation, query)
                 return
             end
 
-            -- YouTube videos.list accepts up to 50 IDs per request.
             local detailsURL =
                 "https://www.googleapis.com/youtube/v3/videos"
                 .. "?part=contentDetails&id="
@@ -603,8 +1231,6 @@ local function fetchBatch(generation, query)
             for _, id in ipairs(ids) do
                 local duration = durationById[id]
 
-                -- Approximate Shorts filtering: skip videos under 60 sec.
-                -- YouTube does not expose a definitive Shorts flag here.
                 if duration and duration.seconds
                     and duration.seconds >= 60 then
 
@@ -627,16 +1253,15 @@ local function fetchBatch(generation, query)
         isLoading = false
 
         if not ok then
-            statusLabel.Text = "API error: " .. tostring(err)
-            statusLabel.TextColor3 = Color3.fromRGB(255, 115, 115)
+            setStatus("API error: " .. tostring(err), RED)
         elseif #allResults == 0 and noMorePages then
-            statusLabel.Text =
-                "No videos of 60 seconds or longer were found."
-            statusLabel.TextColor3 = Color3.fromRGB(190, 194, 207)
+            setStatus("No videos of 60 seconds or longer were found.", LIGHT)
         else
-            statusLabel.Text = "Loaded " .. tostring(#allResults)
-                .. " eligible videos. Select COPY LINK to copy a URL."
-            statusLabel.TextColor3 = Color3.fromRGB(125, 220, 160)
+            setStatus(
+                "Loaded " .. tostring(#allResults)
+                    .. " eligible videos. Press PLAY AUDIO to listen.",
+                GREEN
+            )
         end
 
         renderPage()
@@ -645,11 +1270,19 @@ local function fetchBatch(generation, query)
 end
 
 local function startSearch()
-    local query = searchBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
+    local query = trim(searchBox.Text)
 
     if query == "" then
-        statusLabel.Text = "Type something to search for."
-        statusLabel.TextColor3 = Color3.fromRGB(255, 170, 100)
+        setStatus("Type something to search for.", ORANGE)
+        return
+    end
+
+    local linkedId = extractVideoId(query)
+
+    if linkedId then
+        playVideo({
+            id = linkedId
+        })
         return
     end
 
@@ -658,6 +1291,7 @@ local function startSearch()
 
     allResults = {}
     currentPage = 1
+    currentQuery = query
     nextPageToken = nil
     noMorePages = false
     isLoading = false
@@ -698,13 +1332,11 @@ nextButton.MouseButton1Click:Connect(function()
 
     if not noMorePages then
         currentPage += 1
-        fetchBatch(searchGeneration, searchBox.Text)
+        fetchBatch(searchGeneration, currentQuery)
     else
-        statusLabel.Text = "No more results."
-        statusLabel.TextColor3 = Color3.fromRGB(190, 194, 207)
+        setStatus("No more results.", LIGHT)
     end
 end)
 
--- Initial view
 showMessage("Search YouTube to see results here.")
 updateFooter()
