@@ -1,33 +1,36 @@
 
--- Saiki YouTube Search
--- Roblox executor script
--- Requires HTTP request support and clipboard support.
+--========================================================
+-- SAIKI YOUTUBE SEARCH v2
+-- Features: duration, pagination, Shorts filtering,
+-- draggable GUI, close button, copy video URL
+--========================================================
 
 local API_KEY = "AIzaSyDrMXfPlivYHSMUsM3zcxZ4srY6yKkK3PY"
 local GUI_NAME = "SaikiYouTubeSearch"
 
--- Clean up any previous instance
 local CoreGui = game:GetService("CoreGui")
-local old = CoreGui:FindFirstChild(GUI_NAME)
-if old then old:Destroy() end
-
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
+
+local old = CoreGui:FindFirstChild(GUI_NAME)
+if old then old:Destroy() end
 
 local requestFunc = request or http_request
     or (syn and syn.request)
     or (fluxus and fluxus.request)
 
-local clipboardFunc = setclipboard
-    or toclipboard
+local clipboardFunc = setclipboard or toclipboard
     or (Clipboard and Clipboard.set)
 
 if not requestFunc then
-    warn("Saiki YouTube: HTTP request function unavailable.")
+    warn("Saiki YouTube: HTTP request support unavailable.")
     return
 end
 
+--========================================================
 -- GUI
+--========================================================
+
 local gui = Instance.new("ScreenGui")
 gui.Name = GUI_NAME
 gui.ResetOnSpawn = false
@@ -35,32 +38,23 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = CoreGui
 
 local main = Instance.new("Frame")
-main.Name = "Main"
-main.Size = UDim2.fromOffset(540, 440)
-main.Position = UDim2.new(0.5, -270, 0.5, -220)
+main.Size = UDim2.fromOffset(540, 475)
+main.Position = UDim2.new(0.5, -270, 0.5, -237)
 main.BackgroundColor3 = Color3.fromRGB(20, 22, 29)
 main.BorderSizePixel = 0
 main.Parent = gui
 
-local mainCorner = Instance.new("UICorner")
-mainCorner.CornerRadius = UDim.new(0, 12)
-mainCorner.Parent = main
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
 
-local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(60, 68, 85)
-stroke.Thickness = 1
-stroke.Parent = main
+local outline = Instance.new("UIStroke", main)
+outline.Color = Color3.fromRGB(60, 68, 85)
 
--- Draggable header
 local header = Instance.new("Frame")
 header.Size = UDim2.new(1, 0, 0, 43)
 header.BackgroundColor3 = Color3.fromRGB(30, 33, 43)
 header.BorderSizePixel = 0
 header.Parent = main
-
-local headerCorner = Instance.new("UICorner")
-headerCorner.CornerRadius = UDim.new(0, 12)
-headerCorner.Parent = header
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 12)
 
 local headerFix = Instance.new("Frame")
 headerFix.Position = UDim2.new(0, 0, 1, -12)
@@ -70,8 +64,8 @@ headerFix.BorderSizePixel = 0
 headerFix.Parent = header
 
 local close = Instance.new("TextButton")
-close.Size = UDim2.fromOffset(34, 32)
 close.Position = UDim2.fromOffset(6, 5)
+close.Size = UDim2.fromOffset(34, 32)
 close.Text = "×"
 close.TextSize = 27
 close.Font = Enum.Font.Gotham
@@ -79,7 +73,6 @@ close.TextColor3 = Color3.fromRGB(255, 105, 110)
 close.BackgroundColor3 = Color3.fromRGB(48, 39, 48)
 close.BorderSizePixel = 0
 close.Parent = header
-
 Instance.new("UICorner", close).CornerRadius = UDim.new(0, 8)
 
 close.MouseButton1Click:Connect(function()
@@ -97,7 +90,6 @@ heading.Font = Enum.Font.GothamBold
 heading.TextXAlignment = Enum.TextXAlignment.Left
 heading.Parent = header
 
--- Search field
 local searchBox = Instance.new("TextBox")
 searchBox.Position = UDim2.fromOffset(12, 54)
 searchBox.Size = UDim2.new(1, -112, 0, 36)
@@ -129,7 +121,7 @@ local status = Instance.new("TextLabel")
 status.Position = UDim2.fromOffset(14, 96)
 status.Size = UDim2.new(1, -28, 0, 22)
 status.BackgroundTransparency = 1
-status.Text = "Enter a keyword to begin."
+status.Text = "Search for videos without Shorts."
 status.TextColor3 = Color3.fromRGB(165, 174, 195)
 status.TextSize = 12
 status.Font = Enum.Font.Gotham
@@ -138,7 +130,7 @@ status.Parent = main
 
 local results = Instance.new("ScrollingFrame")
 results.Position = UDim2.fromOffset(12, 122)
-results.Size = UDim2.new(1, -24, 1, -134)
+results.Size = UDim2.new(1, -24, 1, -180)
 results.BackgroundColor3 = Color3.fromRGB(25, 28, 37)
 results.BorderSizePixel = 0
 results.ScrollBarThickness = 5
@@ -148,25 +140,55 @@ results.AutomaticCanvasSize = Enum.AutomaticSize.Y
 results.Parent = main
 Instance.new("UICorner", results).CornerRadius = UDim.new(0, 9)
 
-local padding = Instance.new("UIPadding")
+local padding = Instance.new("UIPadding", results)
 padding.PaddingTop = UDim.new(0, 7)
 padding.PaddingBottom = UDim.new(0, 7)
 padding.PaddingLeft = UDim.new(0, 7)
 padding.PaddingRight = UDim.new(0, 7)
-padding.Parent = results
 
-local list = Instance.new("UIListLayout")
+local list = Instance.new("UIListLayout", results)
 list.Padding = UDim.new(0, 7)
 list.SortOrder = Enum.SortOrder.LayoutOrder
-list.Parent = results
 
-local function clearResults()
-    for _, child in ipairs(results:GetChildren()) do
-        if child:IsA("Frame") then
-            child:Destroy()
-        end
-    end
-end
+-- Bottom pagination controls
+local previousButton = Instance.new("TextButton")
+previousButton.Position = UDim2.new(0, 12, 1, -48)
+previousButton.Size = UDim2.fromOffset(112, 36)
+previousButton.Text = "< Previous 10"
+previousButton.Font = Enum.Font.GothamBold
+previousButton.TextSize = 11
+previousButton.TextColor3 = Color3.new(1, 1, 1)
+previousButton.BackgroundColor3 = Color3.fromRGB(52, 58, 74)
+previousButton.BorderSizePixel = 0
+previousButton.Parent = main
+Instance.new("UICorner", previousButton).CornerRadius = UDim.new(0, 8)
+
+local pageLabel = Instance.new("TextLabel")
+pageLabel.Position = UDim2.new(0.5, -60, 1, -48)
+pageLabel.Size = UDim2.fromOffset(120, 36)
+pageLabel.BackgroundTransparency = 1
+pageLabel.Text = "Page 1"
+pageLabel.TextColor3 = Color3.fromRGB(190, 199, 219)
+pageLabel.TextSize = 12
+pageLabel.Font = Enum.Font.GothamBold
+pageLabel.Parent = main
+
+local nextButton = Instance.new("TextButton")
+nextButton.AnchorPoint = Vector2.new(1, 0)
+nextButton.Position = UDim2.new(1, -12, 1, -48)
+nextButton.Size = UDim2.fromOffset(112, 36)
+nextButton.Text = "Next 10 >"
+nextButton.Font = Enum.Font.GothamBold
+nextButton.TextSize = 11
+nextButton.TextColor3 = Color3.new(1, 1, 1)
+nextButton.BackgroundColor3 = Color3.fromRGB(52, 91, 155)
+nextButton.BorderSizePixel = 0
+nextButton.Parent = main
+Instance.new("UICorner", nextButton).CornerRadius = UDim.new(0, 8)
+
+--========================================================
+-- HELPERS
+--========================================================
 
 local function urlEncode(value)
     return (value:gsub("([^%w%-_%.~])", function(char)
@@ -174,16 +196,78 @@ local function urlEncode(value)
     end))
 end
 
-local function createResult(index, item)
-    local videoId = item.id and item.id.videoId
-    if not videoId then return end
+local function apiGet(url)
+    local response = requestFunc({
+        Url = url,
+        Method = "GET",
+        Headers = { ["Accept"] = "application/json" }
+    })
 
+    local code = response.StatusCode or response.Status or 0
+    local body = response.Body or ""
+
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(body)
+    end)
+
+    if code < 200 or code >= 300 then
+        local message = "HTTP " .. tostring(code)
+        if ok and data.error and data.error.message then
+            message = data.error.message
+        end
+        error(message)
+    end
+
+    if not ok then
+        error("Could not decode YouTube response.")
+    end
+
+    return data
+end
+
+-- Converts ISO 8601 duration into 12:34 or 1:05:22
+local function formatDuration(iso)
+    local hours = tonumber(iso:match("(%d+)H")) or 0
+    local minutes = tonumber(iso:match("(%d+)M")) or 0
+    local seconds = tonumber(iso:match("(%d+)S")) or 0
+
+    if hours > 0 then
+        return string.format("%d:%02d:%02d", hours, minutes, seconds)
+    end
+
+    return string.format("%d:%02d", minutes, seconds)
+end
+
+local function durationSeconds(iso)
+    local days = tonumber(iso:match("(%d+)D")) or 0
+    local hours = tonumber(iso:match("(%d+)H")) or 0
+    local minutes = tonumber(iso:match("(%d+)M")) or 0
+    local seconds = tonumber(iso:match("(%d+)S")) or 0
+
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+end
+
+local function clearResults()
+    for _, child in ipairs(results:GetChildren()) do
+        if child:IsA("Frame") then
+            child:Destroy()
+        end
+    end
+    results.CanvasPosition = Vector2.new(0, 0)
+end
+
+--========================================================
+-- RESULT CARDS
+--========================================================
+
+local function createResult(index, item, duration)
+    local videoId = item.id.videoId
     local snippet = item.snippet or {}
     local videoUrl = "https://www.youtube.com/watch?v=" .. videoId
 
     local card = Instance.new("Frame")
     card.Name = "Video_" .. index
-    card.Size = UDim2.new(1, -2, 0, 76)
+    card.Size = UDim2.new(1, -2, 0, 83)
     card.BackgroundColor3 = Color3.fromRGB(37, 41, 53)
     card.BorderSizePixel = 0
     card.LayoutOrder = index
@@ -215,8 +299,8 @@ local function createResult(index, item)
     title.Parent = card
 
     local channel = Instance.new("TextLabel")
-    channel.Position = UDim2.fromOffset(40, 45)
-    channel.Size = UDim2.new(1, -155, 0, 20)
+    channel.Position = UDim2.fromOffset(40, 44)
+    channel.Size = UDim2.new(1, -155, 0, 17)
     channel.BackgroundTransparency = 1
     channel.Text = snippet.channelTitle or "Unknown channel"
     channel.TextColor3 = Color3.fromRGB(158, 169, 192)
@@ -225,6 +309,17 @@ local function createResult(index, item)
     channel.TextXAlignment = Enum.TextXAlignment.Left
     channel.TextTruncate = Enum.TextTruncate.AtEnd
     channel.Parent = card
+
+    local durationLabel = Instance.new("TextLabel")
+    durationLabel.Position = UDim2.fromOffset(40, 62)
+    durationLabel.Size = UDim2.fromOffset(100, 15)
+    durationLabel.BackgroundTransparency = 1
+    durationLabel.Text = "Duration: " .. duration
+    durationLabel.TextColor3 = Color3.fromRGB(110, 190, 255)
+    durationLabel.TextSize = 10
+    durationLabel.Font = Enum.Font.GothamBold
+    durationLabel.TextXAlignment = Enum.TextXAlignment.Left
+    durationLabel.Parent = card
 
     local copy = Instance.new("TextButton")
     copy.AnchorPoint = Vector2.new(1, 0.5)
@@ -241,121 +336,229 @@ local function createResult(index, item)
 
     copy.MouseButton1Click:Connect(function()
         if not clipboardFunc then
-            status.Text = "Clipboard is not supported by this executor."
+            status.Text = "Clipboard is unsupported by this executor."
             return
         end
 
-        local ok, err = pcall(clipboardFunc, videoUrl)
+        local ok = pcall(clipboardFunc, videoUrl)
         if ok then
-            status.Text = "Copied video link #" .. index
+            status.Text = "Copied link for result #" .. index
             copy.Text = "COPIED!"
             task.delay(1.2, function()
-                if copy.Parent then copy.Text = "COPY LINK" end
+                if copy.Parent then
+                    copy.Text = "COPY LINK"
+                end
             end)
         else
-            status.Text = "Copy failed: " .. tostring(err)
+            status.Text = "Failed to copy the link."
         end
     end)
 end
 
-local busy = false
+--========================================================
+-- SEARCH AND PAGINATION
+--========================================================
 
-local function search()
+local busy = false
+local currentQuery = ""
+local currentPage = 1
+local nextToken = nil
+local previousTokens = {}
+local hasNext = false
+local hasPrevious = false
+
+local function updatePagination()
+    pageLabel.Text = "Page " .. currentPage
+
+    previousButton.Active = hasPrevious and not busy
+    previousButton.AutoButtonColor = previousButton.Active
+    previousButton.TextTransparency = previousButton.Active and 0 or 0.5
+
+    nextButton.Active = hasNext and not busy
+    nextButton.AutoButtonColor = nextButton.Active
+    nextButton.TextTransparency = nextButton.Active and 0 or 0.5
+end
+
+local function loadPage(token, direction)
     if busy then return end
 
+    if direction == "next" and not hasNext then return end
+    if direction == "previous" and not hasPrevious then return end
+
+    busy = true
+    searchButton.Text = "..."
+    nextButton.Text = "Loading..."
+    status.Text = "Searching and checking video durations..."
+    clearResults()
+    updatePagination()
+
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local url = "https://www.googleapis.com/youtube/v3/search"
+                .. "?part=snippet"
+                .. "&type=video"
+                .. "&maxResults=10"
+                .. "&q=" .. urlEncode(currentQuery)
+                .. "&key=" .. urlEncode(API_KEY)
+
+            if token and token ~= "" then
+                url = url .. "&pageToken=" .. urlEncode(token)
+            end
+
+            -- Search page
+            local data = apiGet(url)
+
+            -- Remember page tokens for Previous/Next navigation
+            if direction == "new" then
+                currentPage = 1
+                previousTokens = {}
+            elseif direction == "next" then
+                table.insert(previousTokens, token)
+                currentPage += 1
+            elseif direction == "previous" then
+                currentPage = math.max(1, currentPage - 1)
+            end
+
+            nextToken = data.nextPageToken
+            hasNext = nextToken ~= nil
+            hasPrevious = currentPage > 1
+
+            local items = data.items or {}
+            local ids = {}
+
+            for _, item in ipairs(items) do
+                if item.id and item.id.videoId then
+                    table.insert(ids, item.id.videoId)
+                end
+            end
+
+            if #ids == 0 then
+                status.Text = "No videos found on this page."
+                return
+            end
+
+            -- Batch-fetch duration details for all 10 videos
+            local detailsUrl = "https://www.googleapis.com/youtube/v3/videos"
+                .. "?part=contentDetails"
+                .. "&id=" .. urlEncode(table.concat(ids, ","))
+                .. "&key=" .. urlEncode(API_KEY)
+
+            local details = apiGet(detailsUrl)
+            local durationMap = {}
+
+            for _, video in ipairs(details.items or {}) do
+                local iso = video.contentDetails
+                    and video.contentDetails.duration
+
+                if iso then
+                    durationMap[video.id] = {
+                        iso = iso,
+                        seconds = durationSeconds(iso),
+                        formatted = formatDuration(iso)
+                    }
+                end
+            end
+
+            local shown = 0
+            local skipped = 0
+
+            for _, item in ipairs(items) do
+                local videoId = item.id and item.id.videoId
+                local info = videoId and durationMap[videoId]
+
+                if info then
+                    -- Shorts filtering:
+                    -- YouTube API does not expose a definitive Shorts flag.
+                    -- Exclude videos under 60 seconds as a practical filter.
+                    if info.seconds < 60 then
+                        skipped += 1
+                    else
+                        shown += 1
+                        createResult(shown, item, info.formatted)
+                    end
+                end
+            end
+
+            if shown == 0 then
+                status.Text = "No eligible videos on this page. Try Next 10."
+            else
+                status.Text = string.format(
+                    "Showing %d videos%s",
+                    shown,
+                    skipped > 0 and (" | Skipped " .. skipped .. " short videos") or ""
+                )
+            end
+        end)
+
+        busy = false
+        searchButton.Text = "SEARCH"
+        nextButton.Text = "Next 10 >"
+        previousButton.Text = "< Previous 10"
+
+        updatePagination()
+
+        if not ok then
+            status.Text = "Error: " .. tostring(err)
+        end
+    end)
+end
+
+searchButton.MouseButton1Click:Connect(function()
     local query = searchBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
+
     if query == "" then
         status.Text = "Please enter a search term."
         return
     end
 
-    busy = true
-    searchButton.Text = "..."
-    clearResults()
-    status.Text = "Searching YouTube..."
+    currentQuery = query
+    currentPage = 1
+    nextToken = nil
+    previousTokens = {}
+    hasPrevious = false
+    hasNext = false
 
-    local endpoint = "https://www.googleapis.com/youtube/v3/search"
-        .. "?part=snippet"
-        .. "&type=video"
-        .. "&maxResults=10"
-        .. "&q=" .. urlEncode(query)
-        .. "&key=" .. urlEncode(API_KEY)
-
-    task.spawn(function()
-        local ok, response = pcall(function()
-            return requestFunc({
-                Url = endpoint,
-                Method = "GET",
-                Headers = { ["Accept"] = "application/json" }
-            })
-        end)
-
-        if not gui.Parent then return end
-
-        if not ok or not response then
-            status.Text = "Network request failed."
-            busy = false
-            searchButton.Text = "SEARCH"
-            return
-        end
-
-        local code = response.StatusCode or response.Status or 0
-        if code < 200 or code >= 300 then
-            local message = "YouTube API error: HTTP " .. tostring(code)
-            local decodedOk, body = pcall(function()
-                return HttpService:JSONDecode(response.Body or "{}")
-            end)
-            if decodedOk and body.error and body.error.message then
-                message = body.error.message
-            end
-            status.Text = message
-            busy = false
-            searchButton.Text = "SEARCH"
-            return
-        end
-
-        local decodedOk, data = pcall(function()
-            return HttpService:JSONDecode(response.Body)
-        end)
-
-        if not decodedOk or type(data) ~= "table" then
-            status.Text = "Could not read YouTube response."
-            busy = false
-            searchButton.Text = "SEARCH"
-            return
-        end
-
-        local count = 0
-        for _, item in ipairs(data.items or {}) do
-            if item.id and item.id.videoId then
-                count += 1
-                createResult(count, item)
-            end
-        end
-
-        if count == 0 then
-            status.Text = "No videos found."
-        else
-            status.Text = "Showing " .. count .. " video results."
-        end
-
-        busy = false
-        searchButton.Text = "SEARCH"
-    end)
-end
-
-searchButton.MouseButton1Click:Connect(search)
-searchBox.FocusLost:Connect(function(enterPressed)
-    if enterPressed then search() end
+    loadPage(nil, "new")
 end)
 
--- Drag window by its header
+searchBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed then
+        searchButton:Activate()
+    end
+end)
+
+nextButton.MouseButton1Click:Connect(function()
+    if busy or not hasNext or not nextToken then return end
+    loadPage(nextToken, "next")
+end)
+
+previousButton.MouseButton1Click:Connect(function()
+    if busy or not hasPrevious then return end
+
+    -- Search API uses opaque tokens. Store the token used to
+    -- reach each page, and use the previous page's token.
+    local tokenForPrevious = previousTokens[#previousTokens]
+
+    if tokenForPrevious then
+        table.remove(previousTokens)
+        loadPage(tokenForPrevious, "previous")
+    end
+end)
+
+updatePagination()
+
+--========================================================
+-- DRAG WINDOW
+--========================================================
+
 local dragging = false
-local dragStart, startPosition
+local dragStart
+local startPosition
 
 header.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
+
         dragging = true
         dragStart = input.Position
         startPosition = main.Position
@@ -374,6 +577,7 @@ UserInputService.InputChanged:Connect(function(input)
         or input.UserInputType == Enum.UserInputType.Touch
     ) then
         local delta = input.Position - dragStart
+
         main.Position = UDim2.new(
             startPosition.X.Scale,
             startPosition.X.Offset + delta.X,
@@ -383,4 +587,4 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
-print("Saiki YouTube Search loaded.")
+print("Saiki YouTube Search v2 loaded.")
