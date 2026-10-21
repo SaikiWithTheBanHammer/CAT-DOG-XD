@@ -4,7 +4,7 @@
 -- Duration display fixed + pagination + copy link
 --========================================================
 
-local API_KEY = "PASTE_YOUR_RESTRICTED_YOUTUBE_API_KEY_HERE"
+local API_KEY = "AIzaSyDrMXfPlivYHSMUsM3zcxZ4srY6yKkK3PY"
 local GUI_NAME = "SaikiYouTubeSearch"
 
 local CoreGui = game:GetService("CoreGui")
