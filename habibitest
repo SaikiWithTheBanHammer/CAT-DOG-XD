@@ -1,3 +1,347 @@
+--[[
+    TATrMusic - Collaborative Multiplayer YouTube Player (Full Version + Debug)
+]]
+
+local CoreGui = game:GetService("CoreGui")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:FindFirstChildOfClass("PlayerGui") or CoreGui
+
+if playerGui:FindFirstChild("TATrMusicSync") then
+    playerGui.TATrMusicSync:Destroy()
+end
+
+-- Configuration & Keys
+local YOUTUBE_API_KEY = "AIzaSyDrMXfPlivYHSMUsM3zcxZ4srY6yKkK3PY"
+local FIREBASE_BASE_URL = "https://your-firebase-app-default-rtdb.firebaseio.com/servers/" .. game.JobId .. ".json"
+local FOLDER_NAME = "TATrMusic/"
+
+local req = (syn and syn.request) or request or http_request or (http and http.request)
+local getasset = getcustomasset or (syn and syn.getcustomasset)
+
+if not req or not getasset or not writefile then
+    warn("[TATrMusic] Executor lacks required functions (request, writefile, getcustomasset).")
+    return
+end
+
+if not isfolder(FOLDER_NAME) then
+    makefolder(FOLDER_NAME)
+end
+
+-- UI Palette
+local c_bg = Color3.fromRGB(16, 16, 26)
+local c_card = Color3.fromRGB(24, 24, 38)
+local c_accent = Color3.fromRGB(139, 92, 246)
+local c_red = Color3.fromRGB(239, 68, 68)
+local c_green = Color3.fromRGB(34, 197, 94)
+local c_text = Color3.fromRGB(240, 240, 250)
+local c_subtext = Color3.fromRGB(140, 140, 165)
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TATrMusicSync"
+screenGui.IgnoreGuiInset = true
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+local mainFrame = Instance.new("Frame", screenGui)
+mainFrame.Size = UDim2.fromOffset(440, 380)
+mainFrame.Position = UDim2.new(0.5, -220, 0.5, -190)
+mainFrame.BackgroundColor3 = c_bg
+mainFrame.BorderSizePixel = 0
+mainFrame.Active = true
+
+local function applyCorner(radius, parent)
+    local c = Instance.new("UICorner", parent)
+    c.CornerRadius = UDim.new(0, radius)
+end
+
+applyCorner(14, mainFrame)
+local stroke = Instance.new("UIStroke", mainFrame)
+stroke.Color = Color3.fromRGB(45, 45, 65)
+stroke.Thickness = 1.5
+
+-- Top Bar
+local topBar = Instance.new("Frame", mainFrame)
+topBar.Size = UDim2.new(1, 0, 0, 42)
+topBar.BackgroundColor3 = c_card
+topBar.BorderSizePixel = 0
+applyCorner(14, topBar)
+
+local titleLabel = Instance.new("TextLabel", topBar)
+titleLabel.Size = UDim2.new(1, -50, 1, 0)
+titleLabel.Position = UDim2.fromOffset(14, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "TATrMusic Sync Player (Server: " .. string.sub(game.JobId, 1, 6) .. ")"
+titleLabel.TextColor3 = c_text
+titleLabel.TextSize = 13
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local closeBtn = Instance.new("TextButton", topBar)
+closeBtn.Size = UDim2.fromOffset(26, 26)
+closeBtn.Position = UDim2.new(1, -34, 0.5, -13)
+closeBtn.BackgroundColor3 = c_red
+closeBtn.Text = "X"
+closeBtn.TextColor3 = c_text
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 12
+applyCorner(6, closeBtn)
+
+closeBtn.Activated:Connect(function()
+    screenGui:Destroy()
+end)
+
+-- Content Container
+local searchContainer = Instance.new("Frame", mainFrame)
+searchContainer.Size = UDim2.new(1, -24, 1, -60)
+searchContainer.Position = UDim2.fromOffset(12, 50)
+searchContainer.BackgroundTransparency = 1
+
+local searchBox = Instance.new("TextBox", searchContainer)
+searchBox.Size = UDim2.new(1, -90, 0, 36)
+searchBox.Position = UDim2.fromOffset(0, 0)
+searchBox.BackgroundColor3 = c_card
+searchBox.PlaceholderText = "Search YouTube song name..."
+searchBox.Text = ""
+searchBox.TextColor3 = c_text
+searchBox.PlaceholderColor3 = c_subtext
+searchBox.TextSize = 12
+searchBox.Font = Enum.Font.Gotham
+searchBox.ClearTextOnFocus = false
+applyCorner(8, searchBox)
+local pad = Instance.new("UIPadding", searchBox)
+pad.PaddingLeft = UDim.new(0, 10)
+
+local searchBtn = Instance.new("TextButton", searchContainer)
+searchBtn.Size = UDim2.new(0, 80, 0, 36)
+searchBtn.Position = UDim2.new(1, -80, 0, 0)
+searchBtn.BackgroundColor3 = c_accent
+searchBtn.Text = "Search"
+searchBtn.TextColor3 = c_text
+searchBtn.Font = Enum.Font.GothamBold
+searchBtn.TextSize = 12
+applyCorner(8, searchBtn)
+
+local scrollList = Instance.new("ScrollingFrame", searchContainer)
+scrollList.Size = UDim2.new(1, 0, 0, 190)
+scrollList.Position = UDim2.fromOffset(0, 44)
+scrollList.BackgroundTransparency = 1
+scrollList.BorderSizePixel = 0
+scrollList.ScrollBarThickness = 4
+scrollList.ScrollBarImageColor3 = c_accent
+scrollList.CanvasSize = UDim2.new(0, 0, 0, 0)
+
+local listLayout = Instance.new("UIListLayout", scrollList)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 6)
+
+-- Footer Controls
+local footer = Instance.new("Frame", mainFrame)
+footer.Size = UDim2.new(1, -24, 0, 80)
+footer.Position = UDim2.new(0, 12, 1, -88)
+footer.BackgroundColor3 = c_card
+applyCorner(10, footer)
+
+local statusText = Instance.new("TextLabel", footer)
+statusText.Size = UDim2.new(1, -20, 0, 22)
+statusText.Position = UDim2.fromOffset(10, 6)
+statusText.BackgroundTransparency = 1
+statusText.Text = "Status: Ready (Sync Active)"
+statusText.TextColor3 = c_green
+statusText.TextSize = 11
+statusText.Font = Enum.Font.GothamBold
+statusText.TextXAlignment = Enum.TextXAlignment.Left
+
+local trackTitleLabel = Instance.new("TextLabel", footer)
+trackTitleLabel.Size = UDim2.new(1, -20, 0, 18)
+trackTitleLabel.Position = UDim2.fromOffset(10, 28)
+trackTitleLabel.BackgroundTransparency = 1
+trackTitleLabel.Text = "No active track"
+trackTitleLabel.TextColor3 = c_subtext
+trackTitleLabel.TextSize = 10
+trackTitleLabel.Font = Enum.Font.Gotham
+trackTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local pauseBtn = Instance.new("TextButton", footer)
+pauseBtn.Size = UDim2.fromOffset(60, 24)
+pauseBtn.Position = UDim2.new(1, -140, 0, 50)
+pauseBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+pauseBtn.Text = "Pause"
+pauseBtn.TextColor3 = c_text
+pauseBtn.TextSize = 10
+pauseBtn.Font = Enum.Font.GothamBold
+applyCorner(6, pauseBtn)
+
+local resumeBtn = Instance.new("TextButton", footer)
+resumeBtn.Size = UDim2.fromOffset(60, 24)
+resumeBtn.Position = UDim2.new(1, -70, 0, 50)
+resumeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+resumeBtn.Text = "Play"
+resumeBtn.TextColor3 = c_text
+resumeBtn.TextSize = 10
+resumeBtn.Font = Enum.Font.GothamBold
+applyCorner(6, resumeBtn)
+
+-- Helpers
+local function urlEncode(str)
+    return str:gsub("([^%w%-%.%_%~])", function(c)
+        return string.format("%%%02X", c:byte())
+    end)
+end
+
+local function httpGet(url)
+    local success, res = pcall(function()
+        return req({Url = url, Method = "GET"})
+    end)
+    if success and res and res.Body then
+        return res.Body
+    end
+    return nil
+end
+
+local activeSound = nil
+
+local function playAudioFile(filePath, trackTitle)
+    if activeSound then
+        pcall(function() activeSound:Stop(); activeSound:Destroy() end)
+    end
+
+    statusText.Text = "Status: Loading Asset..."
+    local assetId = getasset(filePath)
+    
+    local sound = Instance.new("Sound")
+    sound.Name = "SyncMusicNode"
+    sound.SoundId = assetId
+    sound.Volume = 0.8
+    sound.Parent = workspace
+    
+    sound:Play()
+    activeSound = sound
+    
+    trackTitleLabel.Text = "Playing: " .. trackTitle
+    statusText.Text = "Status: Playing (Synced)"
+end
+
+local function downloadAndPlayYouTube(youtubeUrl, title)
+    statusText.Text = "Status: Requesting conversion..."
+    local apiEncodeUrl = "https://p.savenow.to/ajax/download.php?url=" .. urlEncode(youtubeUrl) .. "&format=mp3&apikey=21fbd971d02303568cf35043e7993dafc4ddf260"
+    
+    local body = httpGet(apiEncodeUrl)
+    if not body then
+        statusText.Text = "Status: Error - Conversion API failed"
+        return
+    end
+    
+    local success, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not success or not data or not data.id then
+        statusText.Text = "Status: Error - Bad conversion response"
+        return
+    end
+    
+    local downloadId = data.id
+    statusText.Text = "Status: Converting audio (0%)..."
+    
+    local audioDownloadUrl = nil
+    for i = 1, 60 do
+        task.wait(2)
+        local progBody = httpGet("https://p.savenow.to/ajax/progress.php?id=" .. downloadId)
+        if progBody then
+            local pSucc, pData = pcall(function() return HttpService:JSONDecode(progBody) end)
+            if pSucc and pData then
+                local progNum = tonumber(pData.progress) or 0
+                statusText.Text = "Status: Converting (" .. tostring(math.clamp(progNum, 0, 100)) .. "%)"
+                if progNum >= 1000 and pData.download_url then
+                    audioDownloadUrl = pData.download_url
+                    break
+                end
+            end
+        end
+    end
+    
+    if not audioDownloadUrl then
+        statusText.Text = "Status: Error - Conversion timed out"
+        return
+    end
+    
+    statusText.Text = "Status: Downloading MP3 bytes..."
+    local mp3Res = req({Url = audioDownloadUrl, Method = "GET"})
+    if not mp3Res or not mp3Res.Body then
+        statusText.Text = "Status: Error - MP3 download failed"
+        return
+    end
+    
+    local fileName = FOLDER_NAME .. "tat_" .. downloadId .. ".mp3"
+    writefile(fileName, mp3Res.Body)
+    playAudioFile(fileName, title)
+end
+
+local function processSelectedTrack(youtubeUrl, title)
+    local cachedPath = nil
+    for _, file in ipairs(listfiles(FOLDER_NAME)) do
+        if file:match("%.mp3$") and file:find(youtubeUrl:match("v=([%w_-]+)") or "") then
+            cachedPath = file
+            break
+        end
+    end
+    
+    if cachedPath then
+        statusText.Text = "Status: Loaded from local cache (Instant)!"
+        playAudioFile(cachedPath, title)
+    else
+        downloadAndPlayYouTube(youtubeUrl, title)
+    end
+end
+
+-- Firebase Sync Listener
+local lastPlayedTimestamp = 0
+task.spawn(function()
+    while screenGui.Parent do
+        task.wait(3)
+        local resBody = httpGet(FIREBASE_BASE_URL)
+        if resBody and resBody ~= "null" then
+            local s, parsed = pcall(function() return HttpService:JSONDecode(resBody) end)
+            if s and parsed and parsed.current_song then
+                local song = parsed.current_song
+                if song.timestamp and song.timestamp > lastPlayedTimestamp then
+                    lastPlayedTimestamp = song.timestamp
+                    processSelectedTrack(song.url, song.title)
+                end
+            end
+        end
+    end
+end)
+
+local function pushToFirebase(youtubeUrl, title)
+    local payload = HttpService:JSONEncode({
+        url = youtubeUrl,
+        title = title,
+        timestamp = os.time()
+    })
+    pcall(function()
+        req({
+            Url = FIREBASE_BASE_URL,
+            Method = "PUT",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = payload
+        })
+    end)
+end
+
+local function parseDuration(iso)
+    local m = tonumber(iso:match("(%d+)M")) or 0
+    local s = tonumber(iso:match("(%d+)S")) or 0
+    local h = tonumber(iso:match("(%d+)H")) or 0
+    return (h * 3600) + (m * 60) + s
+end
+
+local currentQuery = ""
+local nextPageToken = nil
+
 local function renderSearchResults(query, pageToken)
     currentQuery = query
     scrollList:ClearAllChildren()
@@ -15,14 +359,10 @@ local function renderSearchResults(query, pageToken)
     
     if not success or not res or not res.Body then
         statusText.Text = "Status: Network request failed"
-        print("[Debug Error] Request failed completely.")
         return
     end
     
-    -- Print response code for debugging (200 means success, 400/403 means bad key or quota)
     print("[Debug] API Response Code:", res.StatusCode)
-    print("[Debug] API Body:", res.Body)
-    
     local sData = HttpService:JSONDecode(res.Body)
     if sData.error then
         statusText.Text = "Status: API Error (" .. tostring(sData.error.code) .. ")"
@@ -36,5 +376,116 @@ local function renderSearchResults(query, pageToken)
     end
     
     nextPageToken = sData.nextPageToken
+    
+    local ids = {}
+    for _, item in ipairs(sData.items) do
+        if item.id and item.id.videoId then table.insert(ids, item.id.videoId) end
+    end
+    
+    local detailsUrl = "https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=" .. table.concat(ids, ",") .. "&key=" .. YOUTUBE_API_KEY
+    local dBody = httpGet(detailsUrl)
+    local durations = {}
+    if dBody then
+        local dData = HttpService:JSONDecode(dBody)
+        if dData and dData.items then
+            for _, dItem in ipairs(dData.items) do
+                durations[dItem.id] = parseDuration(dItem.contentDetails.duration)
+            end
+        end
+    end
+    
+    local totalItems = 0
+    for _, item in ipairs(sData.items) do
+        if item.id and item.id.videoId then
+            local vId = item.id.videoId
+            local dur = durations[vId] or 0
+            
+            if dur <= 300 then -- Max 5 mins filter
+                totalItems = totalItems + 1
+                local itemFrame = Instance.new("Frame", scrollList)
+                itemFrame.Size = UDim2.new(1, -4, 0, 42)
+                itemFrame.BackgroundColor3 = c_card
+                applyCorner(6, itemFrame)
+                
+                -- Red warning border for videos between 3 to 5 minutes
+                if dur > 180 then
+                    local strokeWarn = Instance.new("UIStroke", itemFrame)
+                    strokeWarn.Color = c_red
+                    strokeWarn.Thickness = 1.3
+                end
+                
+                local btn = Instance.new("TextButton", itemFrame)
+                btn.Size = UDim2.new(1, -8, 1, 0)
+                btn.Position = UDim2.fromOffset(4, 0)
+                btn.BackgroundTransparency = 1
+                btn.Text = item.snippet.title
+                btn.TextColor3 = c_text
+                btn.TextSize = 10
+                btn.Font = Enum.Font.Gotham
+                btn.TextXAlignment = Enum.TextXAlignment.Left
+                btn.TextTruncate = Enum.TextTruncate.AtEnd
+                
+                if dur > 180 then
+                    local warnLabel = Instance.new("TextLabel", itemFrame)
+                    warnLabel.Size = UDim2.new(1, -10, 0, 12)
+                    warnLabel.Position = UDim2.fromOffset(6, 26)
+                    warnLabel.BackgroundTransparency = 1
+                    warnLabel.Text = "⚠️ Long video: may take longer to load first time."
+                    warnLabel.TextColor3 = c_red
+                    warnLabel.TextSize = 8
+                    warnLabel.Font = Enum.Font.GothamBold
+                    warnLabel.TextXAlignment = Enum.TextXAlignment.Left
+                    btn.Size = UDim2.new(1, -8, 0, 26)
+                end
+                
+                local targetUrl = "https://www.youtube.com/watch?v=" .. vId
+                local targetTitle = item.snippet.title
+                
+                btn.Activated:Connect(function()
+                    pushToFirebase(targetUrl, targetTitle)
+                end)
+            end
+        end
+    end
+    
+    if nextPageToken then
+        totalItems = totalItems + 1
+        local moreBtn = Instance.new("TextButton", scrollList)
+        moreBtn.Size = UDim2.new(1, -4, 0, 32)
+        moreBtn.BackgroundColor3 = c_accent
+        moreBtn.Text = "Load Next 10 Results"
+        moreBtn.TextColor3 = c_text
+        moreBtn.Font = Enum.Font.GothamBold
+        moreBtn.TextSize = 10
+        applyCorner(6, moreBtn)
+        
+        moreBtn.Activated:Connect(function()
+            renderSearchResults(currentQuery, nextPageToken)
+        end)
+    end
+    
+    scrollList.CanvasSize = UDim2.new(0, 0, 0, totalItems * 48)
     statusText.Text = "Status: Ready"
 end
+
+searchBtn.Activated:Connect(function()
+    if searchBox.Text ~= "" then
+        renderSearchResults(searchBox.Text, nil)
+    end
+end)
+
+searchBox.FocusLost:Connect(function(enterPressed)
+    if enterPressed and searchBox.Text ~= "" then
+        renderSearchResults(searchBox.Text, nil)
+    end
+end)
+
+pauseBtn.Activated:Connect(function()
+    if activeSound then activeSound:Pause() end
+end)
+
+resumeBtn.Activated:Connect(function()
+    if activeSound then activeSound:Play() end
+end)
+
+print("[TATrMusic] Fully loaded script running!")
