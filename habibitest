@@ -65,6 +65,8 @@ local CONFIG = {
 	ANNOUNCE_SOUND = 128187340772806, -- plays on everyone's device when an announcement arrives
 	WELCOME_ENABLED = true,           -- post a quiet "Welcome <you> to Saiki Rechat" line in the server chat when the script loads
 	WELCOME_TEXT = "joined Saiki Rechat", -- the message that carries it (older versions simply show this text)
+	MODS_URL = "https://raw.githubusercontent.com/SaikiWithTheBanHammer/ScriptBlox/main/lkdnsx", -- moderator usernames, one per line
+	MOD_KICK_TTL = 900,               -- seconds a !saikikick stays valid for a player who isn't running Saiki Rechat right now
 	TOP_RANK_TAG = 50,                -- players in the top N get a #topN tag next to their name in chat
 	-- avatar frames: transparent PNGs from github.com/SaikiWithTheBanHammer/Frames-XD, drawn over every profile picture.
 	-- w/h = image size, cx/cy = centre of the picture hole, r = hole radius (all in image pixels)
@@ -710,6 +712,7 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 
 	local nextOk = 0
 	local function fire(p)
+		if T.isMuted and T.isMuted(ME) then self.notice("You are muted by a moderator."); return false end
 		if os.clock() < nextOk then return false end
 		if cooldown and cooldown > 0 then
 			nextOk = os.clock() + cooldown
@@ -734,12 +737,39 @@ local function ChatView(parent, onSend, cooldown, placeholder, onReact)
 			if T.annSend(self, txt) then box.Text = "" end
 			return
 		end
+		if low:sub(1, 1) == "!" and T.modCmd and T.modCmd(self, txt) then box.Text = ""; return end -- moderator commands
 		if fire({ text = txt }) then box.Text = "" end
 	end
 	bind(btn.Activated, submit)
 	bind(box.FocusLost, function(enter) if enter then submit() end end)
 	function self.sendSticker(ref) return fire({ stk = ref }) end
 	function self.sendText(t) return fire({ text = t }) end
+
+	-- moderator auto-fill: usernames / frame names appear above the input while a moderator command is being typed
+	local sugg = new("ScrollingFrame", { AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -54), Size = UDim2.new(1, -28, 0, 30),
+		BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.X,
+		ScrollingDirection = Enum.ScrollingDirection.X, Visible = false, ZIndex = 5, Parent = root }, {
+		new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6),
+			VerticalAlignment = Enum.VerticalAlignment.Center }),
+	})
+	local function showSuggest()
+		local items = T.modSuggest and T.modSuggest(box.Text) or nil
+		for _, c in ipairs(sugg:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+		if not items or #items == 0 then sugg.Visible = false; return end
+		sugg.Position = UDim2.new(0.5, 0, 1, replyBar.Visible and -92 or -54)
+		for i, it in ipairs(items) do
+			local chip = new("TextButton", { Size = UDim2.fromOffset(0, 26), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = T.bg,
+				BackgroundTransparency = 0.05, Text = it.label, Font = T.fontB, TextSize = 12, TextColor3 = T.text, AutoButtonColor = false,
+				LayoutOrder = i, ZIndex = 6, Parent = sugg }, { corner(13), stroke(0.7, 1),
+				new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12) }) })
+			chip.Activated:Connect(function()
+				box.Text = it.fill
+				pcall(function() box:CaptureFocus() end)
+			end)
+		end
+		sugg.Visible = true
+	end
+	box:GetPropertyChangedSignal("Text"):Connect(function() if T.modSuggest then pcall(showSuggest) end end)
 
 	-- ===== reactions =====
 	local function renderReactions(key)
@@ -1358,9 +1388,10 @@ function T.showServer(uid, name, text, stk, key, reply, silent)
 	end
 	local body = (not stk) and type(text) == "string" and text:lower():sub(1, 5) == "!anc " and text:match("^%S+%s+(.+)$")
 	if not body then plain(); return end
+	local isM = T.isMod and T.isMod(uid)
 	local function decide(tier)
-		if tier and tier >= (CONFIG.ANNOUNCE_MIN_TIER or 4) then
-			views[1].addAnnouncement({ name = name, text = body, title = CONFIG.TITLES and CONFIG.TITLES[tier] or "" })
+		if isM or (tier and tier >= (CONFIG.ANNOUNCE_MIN_TIER or 4)) then
+			views[1].addAnnouncement({ name = name, text = body, title = isM and "MODERATOR" or (CONFIG.TITLES and CONFIG.TITLES[tier] or "") })
 			if not silent then
 				T.playAnc()
 				markUnread(1, uid)
@@ -1371,12 +1402,14 @@ function T.showServer(uid, name, text, stk, key, reply, silent)
 		end
 	end
 	local tier = T.annTier and T.annTier(uid, false)
-	if tier ~= nil then decide(tier) else task.spawn(function() decide(T.annTier and T.annTier(uid, true)) end) end
+	if isM then decide(nil)
+	elseif tier ~= nil then decide(tier)
+	else task.spawn(function() decide(T.annTier and T.annTier(uid, true)) end) end
 end
 
 local function serverHandler(key, m, silent)
 	local uid = tonumber(m.uid)
-	if not uid or banned[uid] then return end
+	if not uid or banned[uid] or (T.isMuted and T.isMuted(uid)) then return end
 	local text, stk = parseMsg(m)
 	if not text then return end
 	local p = Players:GetPlayerByUserId(uid)
@@ -1890,7 +1923,7 @@ views.dm.root.Size = UDim2.new(1, 0, 1, -38)
 local function dmHandler(key, m)
 	local uid = tostring(m.uid or "")
 	if uid ~= ME and uid ~= dm.partner then return end
-	if banned[tonumber(uid)] then return end
+	if banned[tonumber(uid)] or (T.isMuted and T.isMuted(uid)) then return end
 	local st = toStored(key, m)
 	if not st then return end
 	if activeConv then activeConv[#activeConv + 1] = st; activeDirty = true end
@@ -1955,7 +1988,7 @@ local function fetchNew(pid, inboxTs)
 	for _, st in ipairs(msgs) do have[st.k] = true end
 	for _, it in ipairs(rows) do
 		local uid = tostring(it.v.uid or "")
-		if not have[it.k] and (uid == ME or uid == pid) and not banned[tonumber(uid)] then
+		if not have[it.k] and (uid == ME or uid == pid) and not banned[tonumber(uid)] and not (T.isMuted and T.isMuted(uid)) then
 			local st = toStored(it.k, it.v)
 			if st then
 				msgs[#msgs + 1] = st; added = true; touchIndex(pid, st)
@@ -2389,7 +2422,7 @@ do
 	end
 
 	-- ===== chat name tags: tier title + #top rank (one /followers download feeds everyone, shared + cached) =====
-	do
+	;(function()
 		local METAL = { Color3.fromRGB(255, 203, 64), Color3.fromRGB(205, 213, 230), Color3.fromRGB(214, 132, 72) } -- gold, silver, bronze
 		local counts, rankOf = {}, {}
 		local bStamp, bBusy = -1e9, false
@@ -2414,10 +2447,17 @@ do
 			elseif r.title then
 				r.title:Destroy(); r.title = nil
 			end
+			local ct = T.customTitle and T.customTitle[id]
+			if ct and ct ~= "" then
+				if not r.custom then r.custom = pill(r.row, 3, ct, Color3.fromRGB(255, 105, 180), true) end
+				r.custom.Text = ct
+			elseif r.custom then
+				r.custom:Destroy(); r.custom = nil
+			end
 			local rk = rankOf[id]
 			if rk then
 				local col = METAL[rk] or T.accB
-				if not r.rank then r.rank = pill(r.row, 3, "", col, true) end
+				if not r.rank then r.rank = pill(r.row, 4, "", col, true) end
 				r.rank.Text, r.rank.TextColor3, r.rank.BackgroundColor3 = "#top" .. rk, col, col
 			elseif r.rank then
 				r.rank:Destroy(); r.rank = nil
@@ -2465,7 +2505,7 @@ do
 					local okc, ch = dbRequest("GET", "/frames", nil, dmAuth, DM_FIREBASE_DB)
 					if okc and type(ch) == "table" then
 						local m = {}
-						for id, v in pairs(ch) do if v == 1 or v == 2 then m[tostring(id)] = v end end
+						for id, v in pairs(ch) do if v == 1 or v == 2 or type(v) == "string" then m[tostring(id)] = v end end
 						local mine = T.frameChoice and T.frameChoice[ME]
 						if mine and not m[ME] then m[ME] = mine end
 						T.frameChoice = m
@@ -2481,6 +2521,7 @@ do
 
 		function T.boardCount(id) return counts[id] end
 		function T.boardRank(id) return rankOf[id] end
+		function T.repaintTags() repaintAll() end
 		function T.boardLoaded() return T.boardOk == true end
 		function T.boardNeeded() if os.clock() - bStamp > 90 then loadBoard() end end
 
@@ -2496,7 +2537,7 @@ do
 				if (#reg > 0 or isOpen) and os.clock() - bStamp > 90 then loadBoard() end
 			end
 		end)
-	end
+	end)()
 end
 
 ----------------------------------------------------------------- V2.6: profile popup (tap an avatar or name)
@@ -3020,7 +3061,7 @@ local function pollReactions(path, tAuth, base, view)
 		if type(map) == "table" then
 			local good = {}
 			for uid, e in pairs(map) do
-				if type(e) == "string" and ALLOWED_REACT[e] and not banned[tonumber(uid)] then good[tostring(uid)] = e end
+				if type(e) == "string" and ALLOWED_REACT[e] and not banned[tonumber(uid)] and not (T.isMuted and T.isMuted(uid)) then good[tostring(uid)] = e end
 			end
 			view.setReactions(tostring(key), good)
 		end
@@ -3333,6 +3374,329 @@ end)()
 	task.delay(5, function() if alive and #scan(true) > 0 then T.guardShow() end end) -- Ares/BxD is running next to us
 end)()
 
+----------------------------------------------------------------- moderators (usernames come from CONFIG.MODS_URL on GitHub)
+;(function()
+	local MODFILE = CACHE .. "/mods.json"
+	local ids, ready = {}, false                       -- moderator userIds (as strings)
+	local handledKick = {}
+	T.muted, T.customTitle, T.modNames = {}, {}, {}
+	T.granted = T.granted or {}
+
+	local function nowMs() return os.time() * 1000 end
+	function T.isMod(id) return ids[tostring(id)] == true end
+	function T.isMuted(id)
+		local tid = tostring(id)
+		local u = T.muted[tid]
+		if u == nil or T.isMod(tid) then return false end
+		return u == 0 or u > nowMs()
+	end
+
+	local function trim(x) x = x:gsub("^%s+", ""); x = x:gsub("%s+$", ""); return x end
+
+	-- moderator names (GitHub, one per line) -> userIds (Roblox API, cached on disk so it also works offline)
+	local function loadMods()
+		local list
+		if REQUEST and CONFIG.MODS_URL and CONFIG.MODS_URL ~= "" then
+			local ok, res = pcall(REQUEST, { Url = CONFIG.MODS_URL, Method = "GET" })
+			if ok and type(res) == "table" and (tonumber(res.StatusCode or res.Status) or 0) == 200 then
+				list = {}
+				for line in tostring(res.Body or res.body or ""):gmatch("[^\r\n]+") do
+					local nm = trim(line)
+					if nm:match("^[%w_]+$") and #nm >= 3 and #nm <= 20 then list[#list + 1] = nm end
+				end
+			end
+		end
+		local cache = {}
+		pcall(function()
+			if isfile and readfile and isfile(MODFILE) then
+				local d = HttpService:JSONDecode(readfile(MODFILE))
+				if type(d) == "table" and type(d.ids) == "table" then cache = d.ids end
+			end
+		end)
+		local out = {}
+		if list then
+			T.modNames = list
+			for _, nm in ipairs(list) do
+				local low = nm:lower()
+				local id
+				if low == LP.Name:lower() then
+					id = string.format("%.0f", LP.UserId)
+				else
+					local ok, res = pcall(function() return Players:GetUserIdFromNameAsync(nm) end)
+					id = (ok and res) and string.format("%.0f", res) or cache[low]
+				end
+				if id then out[low] = id end
+			end
+			pcall(function() if writefile then writefile(MODFILE, HttpService:JSONEncode({ ids = out, t = os.time() })) end end)
+		else
+			out = cache -- offline: last known list
+		end
+		local set = {}
+		for _, id in pairs(out) do set[tostring(id)] = true end
+		ids, ready = set, true
+	end
+
+	-- everything moderators did, one small read: kicks, mutes, custom titles, secret frames
+	local function parseMods(data)
+		local mute, title, granted = {}, {}, {}
+		local nowms = nowMs()
+		for target, byMap in pairs(data.mute or {}) do
+			local tid = tostring(target)
+			if type(byMap) == "table" and not T.isMod(tid) then
+				for by, rec in pairs(byMap) do
+					if T.isMod(by) and type(rec) == "table" then
+						local u = tonumber(rec["until"]) or 0
+						if u == 0 or u > nowms then
+							local prev = mute[tid]
+							if prev == nil then mute[tid] = u elseif prev ~= 0 and (u == 0 or u > prev) then mute[tid] = u end
+						end
+					end
+				end
+			end
+		end
+		for target, byMap in pairs(data.title or {}) do
+			local best, bt = nil, -1
+			if type(byMap) == "table" then
+				for by, rec in pairs(byMap) do
+					if T.isMod(by) and type(rec) == "table" and type(rec.t) == "string" and rec.t ~= "" then
+						local ts = tonumber(rec.ts) or 0
+						if ts > bt then best, bt = rec.t, ts end
+					end
+				end
+			end
+			if best then title[tostring(target)] = best:sub(1, 24) end
+		end
+		for target, fmap in pairs(data.frame or {}) do
+			if type(fmap) == "table" then
+				for fkey, byMap in pairs(fmap) do
+					if CONFIG.FRAMES[fkey] and type(byMap) == "table" then
+						for by in pairs(byMap) do
+							if T.isMod(by) then
+								local tid = tostring(target)
+								granted[tid] = granted[tid] or {}
+								granted[tid][fkey] = true
+							end
+						end
+					end
+				end
+			end
+		end
+		return mute, title, granted
+	end
+
+	-- a moderator kicked me (moderators themselves can't be kicked)
+	local function checkKick(data)
+		local recs = data.kick and data.kick[ME]
+		if type(recs) ~= "table" or T.isMod(ME) then return end
+		for by, rec in pairs(recs) do
+			if T.isMod(by) and type(rec) == "table" then
+				local ts = tonumber(rec.ts) or 0
+				local key = tostring(by) .. ":" .. ts
+				if ts > 0 and not handledKick[key] and nowMs() - ts < (CONFIG.MOD_KICK_TTL or 900) * 1000 then
+					handledKick[key] = true
+					local why = (type(rec.r) == "string" and rec.r ~= "") and ("\nReason: " .. rec.r:sub(1, 80)) or ""
+					kick("You were kicked by a Saiki Rechat moderator." .. why)
+					return
+				end
+			end
+		end
+	end
+
+	local function pollMods()
+		if not REQUEST or not ready then return end
+		T.dmId()
+		local ok, data = dbRequest("GET", "/mods", nil, dmAuth, DM_FIREBASE_DB)
+		if not ok then return end
+		if type(data) ~= "table" then data = {} end
+		T.muted, T.customTitle, T.granted = parseMods(data)
+		checkKick(data)
+		if T.refreshFrames then pcall(T.refreshFrames) end
+		if T.repaintTags then pcall(T.repaintTags) end
+	end
+
+	-------- commands
+	local CMDS = { "!saikikick", "!saikianc", "!giveframe", "!saikicustomtitle", "!saikimute" }
+	local function isCmd(w) for _, c in ipairs(CMDS) do if c == w then return true end end return false end
+
+	-- username -> userId, also for players who are not in this server
+	local function resolveUser(name)
+		name = name:gsub("^@", "")
+		local low = name:lower()
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Name:lower() == low or p.DisplayName:lower() == low then return string.format("%.0f", p.UserId), p.Name end
+		end
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p.Name:lower():sub(1, #low) == low then return string.format("%.0f", p.UserId), p.Name end
+		end
+		local ok, id = pcall(function() return Players:GetUserIdFromNameAsync(name) end)
+		if ok and id then return string.format("%.0f", id), name end
+		return nil
+	end
+
+	local function secretKeys() -- names moderators can give with !giveframe
+		local out = {}
+		for k in pairs(CONFIG.FRAMES) do
+			if k == "rose" or k == "cursed" or k == "demon" then out[#out + 1] = k
+			elseif k:sub(1, 2) == "x_" then out[#out + 1] = k:sub(3) end
+		end
+		table.sort(out, function(a, b) return a:lower() < b:lower() end)
+		return out
+	end
+	local function frameKeyOf(word)
+		local low = word:lower()
+		low = low:gsub("^x_", "")
+		for k in pairs(CONFIG.FRAMES) do
+			local kl = k:lower()
+			if (k == "rose" or k == "cursed" or k == "demon") and kl == low then return k end
+			if k:sub(1, 2) == "x_" and kl:sub(3) == low then return k end
+		end
+		return nil
+	end
+
+	local function put(path, body) T.dmId(); return dbRequest("PUT", path, body, dmAuth, DM_FIREBASE_DB) end
+	local function del(path) T.dmId(); return dbRequest("DELETE", path, nil, dmAuth, DM_FIREBASE_DB) end
+
+	local function runCmd(view, cmd, args)
+		if cmd == "!saikianc" then
+			if args == "" then view.notice("Usage: !saikianc your announcement"); return end
+			view.sendText("!anc " .. args) -- shows in THIS server only; moderators skip the tier check
+			return
+		end
+		local who, rest = args:match("^(%S+)%s*(.*)$")
+		if not who then view.notice("Usage: " .. cmd .. " <username> ..."); return end
+		local id, shown = resolveUser(who)
+		if not id then view.notice('No Roblox user called "' .. who .. '".'); return end
+		local me = ME
+		local ok, code
+		if cmd == "!saikikick" then
+			if T.isMod(id) then view.notice("Moderators can't be kicked."); return end
+			ok, _, _, code = put("/mods/kick/" .. id .. "/" .. me, { ts = SV, r = cut(rest, 60) })
+			view.notice(ok and ("Kick sent for " .. shown .. ". It works whether or not they are in this server: they are removed as soon as their Saiki Rechat checks in (within " .. math.floor((CONFIG.MOD_KICK_TTL or 900) / 60) .. " min).")
+				or ("Couldn't send the kick (HTTP " .. tostring(code) .. "). Publish the new DM rules?"))
+		elseif cmd == "!saikimute" then
+			if T.isMod(id) then view.notice("Moderators can't be muted."); return end
+			local a = rest:lower()
+			if a == "off" or a == "unmute" then
+				ok, _, _, code = del("/mods/mute/" .. id .. "/" .. me)
+				view.notice(ok and (shown .. " is unmuted (by you).") or ("Couldn't unmute (HTTP " .. tostring(code) .. ")."))
+			else
+				local mins = tonumber(rest:match("^(%d+)"))
+				local untilMs = mins and (nowMs() + mins * 60000) or 0
+				ok, _, _, code = put("/mods/mute/" .. id .. "/" .. me, { ts = SV, ["until"] = untilMs })
+				view.notice(ok and (shown .. " is muted " .. (mins and ("for " .. mins .. " min") or "until you unmute them (!saikimute " .. shown .. " off)") .. ".")
+					or ("Couldn't mute (HTTP " .. tostring(code) .. ")."))
+			end
+		elseif cmd == "!saikicustomtitle" then
+			if rest == "" then view.notice("Usage: !saikicustomtitle <username> <tag text | off>"); return end
+			if rest:lower() == "off" then
+				ok, _, _, code = del("/mods/title/" .. id .. "/" .. me)
+				view.notice(ok and ("Custom tag removed from " .. shown .. ".") or ("Couldn't remove it (HTTP " .. tostring(code) .. ")."))
+			else
+				local t = cut(rest, 24)
+				ok, _, _, code = put("/mods/title/" .. id .. "/" .. me, { ts = SV, t = t })
+				view.notice(ok and (shown .. " now has the tag [" .. t .. "].") or ("Couldn't set the tag (HTTP " .. tostring(code) .. ")."))
+			end
+		elseif cmd == "!giveframe" then
+			local fword, off = rest:match("^(%S+)%s*(%S*)$")
+			if not fword then view.notice("Usage: !giveframe <username> <frame> [off]"); return end
+			local key = frameKeyOf(fword)
+			if not key then view.notice('Unknown secret frame "' .. fword .. '". Start typing it and pick a suggestion.'); return end
+			if off:lower() == "off" then
+				ok, _, _, code = del("/mods/frame/" .. id .. "/" .. key .. "/" .. me)
+				view.notice(ok and ("Took the frame " .. fword .. " back from " .. shown .. ".") or ("Couldn't remove it (HTTP " .. tostring(code) .. ")."))
+			else
+				ok, _, _, code = put("/mods/frame/" .. id .. "/" .. key .. "/" .. me, SV)
+				view.notice(ok and (shown .. " can now wear the frame " .. fword .. " (they pick it in Settings).") or ("Couldn't give the frame (HTTP " .. tostring(code) .. ")."))
+			end
+		end
+		if ok then pollMods() end
+	end
+
+	-- called from the chat box; true = handled (the text is never sent as a message)
+	function T.modCmd(view, txt)
+		local cmd = txt:match("^(!%S+)")
+		if not cmd then return false end
+		cmd = cmd:lower()
+		if not isCmd(cmd) then return false end
+		if not ready then view.notice("The moderator list is still loading, try again in a moment."); return true end
+		if not T.isMod(ME) then view.notice("Moderator commands are for Saiki Rechat moderators only."); return true end
+		local args = txt:match("^%S+%s+(.*)$") or ""
+		task.spawn(function()
+			local ok, err = pcall(runCmd, view, cmd, args)
+			if not ok then view.notice("Command failed: " .. tostring(err)) end
+		end)
+		return true
+	end
+
+	-- auto-fill chips for the chat box (moderators only)
+	function T.modSuggest(text)
+		if not (ready and T.isMod(ME)) or text:sub(1, 1) ~= "!" then return nil end
+		local out = {}
+		local word = text:match("^(!%S*)$")
+		if word then
+			local low = word:lower()
+			for _, c in ipairs(CMDS) do
+				if c:sub(1, #low) == low and c ~= low then out[#out + 1] = { label = c, fill = c .. " " } end
+			end
+			return out
+		end
+		local cmd, args = text:match("^(!%S+)%s(.*)$")
+		if not cmd then return nil end
+		cmd = cmd:lower()
+		if not isCmd(cmd) or cmd == "!saikianc" then return nil end
+		local first, tail = args:match("^(%S*)(.*)$")
+		if tail == "" then -- still typing the username
+			local low = first:lower()
+			low = low:gsub("^@", "")
+			for _, p in ipairs(Players:GetPlayers()) do
+				local nm, dn = p.Name:lower(), p.DisplayName:lower()
+				local hit = low == "" or nm:sub(1, #low) == low or dn:sub(1, #low) == low
+					or (#low >= 2 and (nm:find(low, 1, true) ~= nil or dn:find(low, 1, true) ~= nil))
+				local protected = (cmd == "!saikikick" or cmd == "!saikimute") and T.isMod(p.UserId)
+				if hit and not protected then
+					out[#out + 1] = { label = (p.DisplayName ~= p.Name) and (p.DisplayName .. " (@" .. p.Name .. ")") or p.Name, fill = cmd .. " " .. p.Name .. " " }
+					if #out >= 6 then break end
+				end
+			end
+			return out
+		end
+		local second = tail:match("^%s+(%S*)$") -- nil once a second word is finished
+		if second == nil then return nil end
+		local low = second:lower()
+		if cmd == "!giveframe" then
+			local cands = secretKeys()
+			cands[#cands + 1] = "off"
+			for _, k in ipairs(cands) do
+				if low == "" or k:lower():sub(1, #low) == low then out[#out + 1] = { label = k, fill = cmd .. " " .. first .. " " .. k } end
+				if #out >= 8 then break end
+			end
+		elseif cmd == "!saikimute" then
+			for _, k in ipairs({ "off", "10", "30", "60", "1440" }) do
+				if low == "" or k:sub(1, #low) == low then
+					out[#out + 1] = { label = (k == "off") and "off (unmute)" or (k .. " min"), fill = cmd .. " " .. first .. " " .. k }
+				end
+			end
+		elseif cmd == "!saikicustomtitle" then
+			if low == "" or ("off"):sub(1, #low) == low then out[#out + 1] = { label = "off (remove tag)", fill = cmd .. " " .. first .. " off" } end
+		end
+		return out
+	end
+
+	task.spawn(function()
+		pcall(loadMods)
+		while alive do
+			pcall(pollMods)
+			task.wait(20)
+		end
+	end)
+	task.spawn(function()
+		while alive do
+			task.wait(600)
+			pcall(loadMods)
+		end
+	end)
+end)()
+
 ----------------------------------------------------------------- avatar frames (drawn over every profile picture, in every tab)
 ;(function()
 	local assets, loading = {}, {}
@@ -3342,34 +3706,89 @@ end)()
 		CONFIG.FRAMES["x_" .. d.id] = { file = d.file, repo = CONFIG.FRAMES2_REPO, w = d.w, h = d.h, cx = d.cx, cy = d.cy, r = d.r }
 	end
 	ensureFolder(CACHE .. "/frames")
-	T.frameChoice = {}                                 -- [userId] = 1 or 2 (Tier IV pick)
+	T.frameChoice = {}                                 -- [userId] = frame key the player picked (or an old 1 / 2)
 
-	-- which frame does this user wear right now? (nil = none)
-	function T.frameKeyFor(id)
-		if T.frameTest then return T.frameTest end     -- local test from the aura test panel
-		local n = tonumber(id)
-		local sec = n and CONFIG.FRAME_USERS and CONFIG.FRAME_USERS[n]
-		if sec and CONFIG.FRAMES[sec] then return sec end
+	local FNAMES = { t2 = "Tier II", t3 = "Tier III", t4a = "Tier IV-1", t4b = "Tier IV-2", t5 = "Tier V", rose = "Roses", cursed = "Cursed", demon = "Demon" }
+	local function frameLabel(k) return FNAMES[k] or tostring(k):gsub("^x_", "") end
+	T.granted = T.granted or {}                        -- [userId] = { [secretFrameKey] = true }  (given by moderators)
+
+	local function tierOfId(id)                        -- nil = unknown yet
 		local cnt = T.boardCount and T.boardCount(id)
 		if cnt == nil then
 			if T.boardLoaded and not T.boardLoaded() and T.boardNeeded then T.boardNeeded() end
 			local c = FS.cache and FS.cache[id]
 			cnt = c and c.c or nil
-			if cnt == nil then return nil end
 		end
-		local k = CONFIG.TIER_FRAMES and CONFIG.TIER_FRAMES[FS.tierOf(cnt)]
-		if type(k) == "table" then return k[T.frameChoice[id] or 1] or k[1] end
+		return cnt and FS.tierOf(cnt) or nil
+	end
+	local function tierFrames(tier)                    -- every tier frame up to (and including) this tier, lowest first
+		local out = {}
+		for t = 2, tier do
+			local k = CONFIG.TIER_FRAMES and CONFIG.TIER_FRAMES[t]
+			if type(k) == "table" then for _, x in ipairs(k) do out[#out + 1] = x end elseif k then out[#out + 1] = k end
+		end
+		return out
+	end
+	local function staticSecret(id)
+		local n = tonumber(id)
+		local k = n and CONFIG.FRAME_USERS and CONFIG.FRAME_USERS[n]
+		return (k and CONFIG.FRAMES[k]) and k or nil
+	end
+
+	-- which frame does this user wear right now? (nil = none)
+	-- their own pick if they are allowed to wear it (their Tier or lower, or a secret frame a moderator gave them), else the frame of their Tier
+	function T.frameKeyFor(id)
+		if T.frameTest then return T.frameTest end     -- local test from the aura test panel
+		id = tostring(id)
+		local tier = tierOfId(id)
+		local choice = T.frameChoice[id]
+		if type(choice) == "number" then choice = (choice == 2) and "t4b" or ((choice == 1) and "t4a" or nil) end -- old Tier IV picks
+		if choice == "none" then return nil end
+		if choice and CONFIG.FRAMES[choice] then
+			local allowed = (T.granted[id] and T.granted[id][choice]) or staticSecret(id) == choice
+			if not allowed and tier then
+				for _, k in ipairs(tierFrames(tier)) do if k == choice then allowed = true; break end end
+			end
+			if allowed then return choice end
+		end
+		local sec = staticSecret(id)
+		if sec then return sec end
+		if not tier then return nil end
+		local k = CONFIG.TIER_FRAMES and CONFIG.TIER_FRAMES[tier]
+		if type(k) == "table" then return k[1] end
 		return k
 	end
 
-	-- the logged-in player picks frame 1 or 2 (Tier IV): saved in the DM database so everyone sees it
-	function T.setFrameChoice(n)
-		if n ~= 1 and n ~= 2 then return false end
-		T.frameChoice[ME] = n
+	-- everything this user may pick (Auto, No frame, frames of their tier and below, secret frames they were given)
+	function T.frameOptions(id)
+		id = tostring(id)
+		local opts, seen = { { key = "auto", label = "Auto" }, { key = "none", label = "No frame" } }, {}
+		local function add(k) if k and CONFIG.FRAMES[k] and not seen[k] then seen[k] = true; opts[#opts + 1] = { key = k, label = frameLabel(k) } end end
+		local tier = tierOfId(id)
+		if tier then for _, k in ipairs(tierFrames(tier)) do add(k) end end
+		add(staticSecret(id))
+		local keys = {}
+		for k in pairs(T.granted[id] or {}) do keys[#keys + 1] = k end
+		table.sort(keys)
+		for _, k in ipairs(keys) do add(k) end
+		return opts
+	end
+
+	-- the logged-in player picks a frame (key from T.frameOptions, or "auto"): saved in the DM database so everyone sees it
+	function T.setFrameChoice(key)
+		local valid = (key == "auto")
+		if not valid then for _, o in ipairs(T.frameOptions(ME)) do if o.key == key then valid = true; break end end end
+		if not valid then return false end
+		T.frameChoice[ME] = (key ~= "auto") and key or nil
 		if T.refreshFrames then pcall(T.refreshFrames) end
 		if not REQUEST then return true end
 		T.dmId()
-		local ok, _, _, code = dbRequest("PUT", "/frames/" .. ME, tostring(n), dmAuth, DM_FIREBASE_DB)
+		local ok, code
+		if key == "auto" then
+			ok, _, _, code = dbRequest("DELETE", "/frames/" .. ME, nil, dmAuth, DM_FIREBASE_DB)
+		else
+			ok, _, _, code = dbRequest("PUT", "/frames/" .. ME, '"' .. key .. '"', dmAuth, DM_FIREBASE_DB)
+		end
 		return ok and true or false, code
 	end
 
@@ -4050,41 +4469,44 @@ toggleRow("Intro Screen",
 ---------------------------------------------------------------- avatar frame (Tier IV picks one of two)
 header("Avatar Frame")
 do
-	local text = "Tier IV players can wear one of two frames, and everyone sees the one you pick. Tier II, III and V get their frame automatically."
+	local text = "Pick any frame you have unlocked: the frames of your Tier and every lower Tier, plus any secret frame a moderator gave you. Everyone sees the one you pick. Auto = the frame of your own Tier."
 	local dh = textH(text, 12, TW)
-	local c = card(33 + dh + 10 + 36 + 12)
-	local y = title(c, "Tier IV frame")
+	local c = card(33 + dh + 10 + 30 + 12)
+	local y = title(c, "Your frame")
 	desc(c, text, y, TW)
-	local row = new("Frame", { Position = UDim2.fromOffset(12, y + dh + 10), Size = UDim2.new(1, -24, 0, 36), BackgroundTransparency = 1, Parent = c })
+	local grid = new("Frame", { Position = UDim2.fromOffset(12, y + dh + 10), Size = UDim2.new(1, -24, 0, 30), BackgroundTransparency = 1, Parent = c }, {
+		new("UIGridLayout", { CellSize = UDim2.fromOffset(100, 28), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
 	local chips = {}
-	local function paint()
-		local cur = (T.frameChoice and T.frameChoice[H.me]) or 1
-		for n, ch in pairs(chips) do
-			ch.btn.BackgroundTransparency = (n == cur) and 0.8 or 0.94
-			ch.str.Transparency = (n == cur) and 0.35 or 0.92
-		end
-	end
-	for n = 1, 2 do
-		local btn = new("TextButton", { Position = UDim2.new((n - 1) / 2, 0, 0, 0), Size = UDim2.new(0.5, -5, 1, 0), BackgroundColor3 = WHITE,
-			BackgroundTransparency = 0.94, Text = "Frame " .. n, Font = T.fontB, TextSize = 13, TextColor3 = T.text, AutoButtonColor = false,
-			Parent = row }, { corner(12) })
-		local str = stroke(0.92)
-		str.Parent = btn
-		chips[n] = { btn = btn, str = str }
-		btn.Activated:Connect(function()
-			local FS = H.FS
-			local cnt = T.boardCount and T.boardCount(H.me)
-			if cnt == nil then local cc = FS.cache and FS.cache[H.me]; cnt = cc and cc.c or 0 end
-			if FS.tierOf(cnt) < 4 then toast("Frame choice unlocks at Tier IV"); return end
-			paint()
-			task.spawn(function()
-				local ok = T.setFrameChoice and T.setFrameChoice(n)
-				paint()
-				toast(ok and ("Frame " .. n .. " selected") or "Couldn't save your pick (publish the new DM rules)")
+	local build
+	build = function()
+		for _, ch in ipairs(chips) do ch:Destroy() end
+		chips = {}
+		local opts = T.frameOptions and T.frameOptions(H.me) or {}
+		local cur = (T.frameChoice and T.frameChoice[H.me]) or "auto"
+		if type(cur) == "number" then cur = (cur == 2) and "t4b" or "t4a" end
+		for i, o in ipairs(opts) do
+			local sel = (o.key == cur)
+			local btn = new("TextButton", { BackgroundColor3 = WHITE, BackgroundTransparency = sel and 0.8 or 0.94, Text = o.label, Font = T.fontB,
+				TextSize = 12, TextColor3 = T.text, AutoButtonColor = false, TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = i, Parent = grid }, { corner(12) })
+			local str = stroke(sel and 0.35 or 0.92)
+			str.Parent = btn
+			chips[#chips + 1] = btn
+			btn.Activated:Connect(function()
+				task.spawn(function()
+					local ok = T.setFrameChoice and T.setFrameChoice(o.key)
+					toast(ok and ("Frame: " .. o.label) or "Couldn't save your pick (publish the new DM rules)")
+					build()
+				end)
 			end)
-		end)
+		end
+		local rows = math.max(1, math.ceil(#opts / 4))
+		local gh = rows * 28 + (rows - 1) * 6
+		grid.Size = UDim2.new(1, -24, 0, gh)
+		c.Size = UDim2.new(1, 0, 0, 33 + dh + 10 + gh + 12)
 	end
-	paint()
+	build()
+	H.onShow(5, build) -- unlocks can change while the script runs (followers, moderators)
 end
 
 ---------------------------------------------------------------- theme
